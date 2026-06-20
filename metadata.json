@@ -1,0 +1,7 @@
+{
+  "name": "SST_clothing database_trial",
+  "description": "AI-enabled Manufacturing Execution System with Inventory, Sales, and FSM tracking.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

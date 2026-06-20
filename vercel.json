@@ -1,0 +1,12 @@
+{
+  "functions": {
+    "api/telegram-webhook.ts": { "maxDuration": 60 },
+    "api/whatsapp-webhook.ts": { "maxDuration": 60 }
+  },
+  "crons": [
+    {
+      "path": "/api/daily-pulse",
+      "schedule": "30 12 * * *"
+    }
+  ]
+}
