@@ -232,9 +232,11 @@ export const LaunchOrderModal: React.FC<LaunchOrderModalProps> = ({ isOpen, onCl
                   <p className="text-sm text-amber-700 font-semibold mt-2">Checking completed orders for this style...</p>
                 ) : styleWarnings.length > 0 ? (
                   <div className="mt-3 space-y-3">
-                    {styleWarnings.map((item) => (
-                      /* ... existing mapped items code ... */
-                    ))}
+                    {styleWarnings.map((item, index) => (
+                    <div key={index}>
+                      {item.summary}
+                    </div>
+                  ))}
                   </div>
                 ) : (
                   <p className="text-sm text-amber-700 font-medium mt-2">No historical AI issue summaries found for this style.</p>
