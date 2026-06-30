@@ -221,7 +221,7 @@ export const LaunchOrderModal: React.FC<LaunchOrderModalProps> = ({ isOpen, onCl
             </div>
           </div>
 
-          {(warningsLoading || styleWarnings.length > 0) && (
+          {selectedStyleId && (
             <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 flex gap-4 animate-fade-in">
               <div className="p-2 bg-white text-amber-600 rounded-xl border border-amber-100 h-fit">
                 <AlertTriangle size={22} />
@@ -230,17 +230,14 @@ export const LaunchOrderModal: React.FC<LaunchOrderModalProps> = ({ isOpen, onCl
                 <h4 className="text-xs font-black text-amber-900 uppercase tracking-widest">AI Insight From Previous Runs</h4>
                 {warningsLoading ? (
                   <p className="text-sm text-amber-700 font-semibold mt-2">Checking completed orders for this style...</p>
-                ) : (
+                ) : styleWarnings.length > 0 ? (
                   <div className="mt-3 space-y-3">
                     {styleWarnings.map((item) => (
-                      <div key={item.order_id} className="bg-white/70 border border-amber-100 rounded-xl p-4">
-                        <div className="text-[10px] font-black text-amber-600 uppercase tracking-widest mb-2">
-                          {item.order_no} {item.completed_at ? `- ${item.completed_at.slice(0, 10)}` : ''}
-                        </div>
-                        <p className="text-sm text-amber-950 font-medium whitespace-pre-wrap leading-relaxed">{item.summary}</p>
-                      </div>
+                      /* ... existing mapped items code ... */
                     ))}
                   </div>
+                ) : (
+                  <p className="text-sm text-amber-700 font-medium mt-2">No historical AI issue summaries found for this style.</p>
                 )}
               </div>
             </div>

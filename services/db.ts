@@ -8,8 +8,8 @@ import { sizesEqual } from './sizes.js';
 import { generateOrderIssueSummary } from './issueSummary.js';
 
 const API_BASE = (typeof window !== 'undefined' && (window.location.protocol === 'file:' || window.location.hostname === 'localhost'))
-  ? 'https://tintura-mail.vercel.app'
-  : '';
+  ? 'http://localhost:3001'
+  : ''; // Empty string ensures it uses your current Vercel domain
 
 // --- Forecast Calculation Core Engine ---
 export const calculateOrderForecast = (order: Order, style: Style): DetailedRequirement[] => {
@@ -476,7 +476,9 @@ export const deliverSstDocument = async (params: {
   }
 };
 
-const ERP_PUBLIC_BASE = 'https://tintura-sst.vercel.app';
+const ERP_PUBLIC_BASE = typeof window !== 'undefined' 
+  ? window.location.origin 
+  : (process.env.APP_URL || process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://tintura-sst.vercel.app');
 
 /**
  * Fan a short message — or a document (PDF) attachment — out to Telegram for a
