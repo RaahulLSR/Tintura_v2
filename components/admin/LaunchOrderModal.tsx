@@ -60,7 +60,7 @@ export const LaunchOrderModal: React.FC<LaunchOrderModalProps> = ({ isOpen, onCl
   const [selectedStyleId, setSelectedStyleId] = useState<string>('');
   const [styleWarnings, setStyleWarnings] = useState<StyleIssueSummaryInsight[]>([]);
   const [warningsLoading, setWarningsLoading] = useState(false);
-  const [newOrder, setNewOrder] = useState({ style_number: '', unit_id: 1, target_delivery_date: '', description: '', box_count: 0 });
+  const [newOrder, setNewOrder] = useState({ style_number: '', unit_id: 2, target_delivery_date: '', description: '', box_count: 0 });
   
   // Size Management
   const [sizeSequence, setSizeSequence] = useState<string[]>(['S', 'M', 'L', 'XL', 'XXL', '3XL']);
