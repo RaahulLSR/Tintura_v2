@@ -1,8 +1,9 @@
 
 import React, { useState, useEffect } from 'react';
-import { X, Plus, PlusCircle, ArrowLeftRight, Trash2, Upload, ImageIcon, Send, Loader2, BookOpen, ChevronUp, ChevronDown, Ruler } from 'lucide-react';
+import { X, Plus, PlusCircle, ArrowLeftRight, Trash2, Upload, ImageIcon, Send, Loader2, BookOpen, ChevronUp, ChevronDown, Ruler, AlertTriangle } from 'lucide-react';
 import { Unit, SizeBreakdown, Attachment, Style, normalizeSize, getSizeKeyFromLabel } from '../../types';
 import { createOrder, uploadOrderAttachment, triggerOrderEmail, fetchStyles, upsertStyle, postOrderToChat } from '../../services/db';
+import { fetchPreviousStyleIssueSummaries, StyleIssueSummaryInsight } from '../../services/issueSummary';
 
 interface LaunchOrderModalProps {
   isOpen: boolean;
@@ -17,6 +18,8 @@ export const LaunchOrderModal: React.FC<LaunchOrderModalProps> = ({ isOpen, onCl
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [availableStyles, setAvailableStyles] = useState<Style[]>([]);
   const [selectedStyleId, setSelectedStyleId] = useState<string>('');
+  const [styleWarnings, setStyleWarnings] = useState<StyleIssueSummaryInsight[]>([]);
+  const [warningsLoading, setWarningsLoading] = useState(false);
   const [newOrder, setNewOrder] = useState({ style_number: '', unit_id: 1, target_delivery_date: '', description: '', box_count: 0 });
   
   // Size Management
@@ -42,8 +45,10 @@ export const LaunchOrderModal: React.FC<LaunchOrderModalProps> = ({ isOpen, onCl
 
   const handleStyleSelect = (styleId: string) => {
     setSelectedStyleId(styleId);
+    setStyleWarnings([]);
     const style = availableStyles.find(s => s.id === styleId);
     if (!style) {
+      setWarningsLoading(false);
       setNewOrder({ ...newOrder, style_number: '' });
       return;
     }
@@ -77,6 +82,12 @@ export const LaunchOrderModal: React.FC<LaunchOrderModalProps> = ({ isOpen, onCl
       });
       setBreakdown(newBreakdown);
     }
+
+    setWarningsLoading(true);
+    fetchPreviousStyleIssueSummaries(style.style_number)
+      .then(setStyleWarnings)
+      .catch(() => setStyleWarnings([]))
+      .finally(() => setWarningsLoading(false));
   };
 
   const addCustomSize = () => {
@@ -209,6 +220,31 @@ export const LaunchOrderModal: React.FC<LaunchOrderModalProps> = ({ isOpen, onCl
               </select>
             </div>
           </div>
+
+          {(warningsLoading || styleWarnings.length > 0) && (
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 flex gap-4 animate-fade-in">
+              <div className="p-2 bg-white text-amber-600 rounded-xl border border-amber-100 h-fit">
+                <AlertTriangle size={22} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h4 className="text-xs font-black text-amber-900 uppercase tracking-widest">AI Insight From Previous Runs</h4>
+                {warningsLoading ? (
+                  <p className="text-sm text-amber-700 font-semibold mt-2">Checking completed orders for this style...</p>
+                ) : (
+                  <div className="mt-3 space-y-3">
+                    {styleWarnings.map((item) => (
+                      <div key={item.order_id} className="bg-white/70 border border-amber-100 rounded-xl p-4">
+                        <div className="text-[10px] font-black text-amber-600 uppercase tracking-widest mb-2">
+                          {item.order_no} {item.completed_at ? `- ${item.completed_at.slice(0, 10)}` : ''}
+                        </div>
+                        <p className="text-sm text-amber-950 font-medium whitespace-pre-wrap leading-relaxed">{item.summary}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
             <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 ml-1">Style Reference</label><input required className="w-full border-2 border-slate-100 rounded-xl p-4 bg-white text-slate-900 font-bold focus:ring-2 focus:ring-indigo-500 outline-none" value={newOrder.style_number} onChange={e => setNewOrder({...newOrder, style_number: e.target.value})}/></div>

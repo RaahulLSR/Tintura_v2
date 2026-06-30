@@ -101,6 +101,7 @@ export const SalesDashboard: React.FC = () => {
     <div className="max-w-7xl mx-auto space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
+          <p className="text-sm font-bold text-brand-600">Hi {actor.split(' ')[0]} 👋</p>
           <h1 className="page-title flex items-center gap-2"><ShoppingCart className="text-brand-600" /> Sales</h1>
           <p className="page-subtitle">Buyer purchase orders — build a matrix, raise a PO, forward to Inventory &amp; Accounts.</p>
         </div>

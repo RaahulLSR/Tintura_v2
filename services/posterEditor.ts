@@ -21,6 +21,9 @@ export interface BaseEl {
   h: number; // for text, height is auto (ignored on render)
   rotation: number;
   opacity: number;
+  name?: string;    // optional layer name shown in the layers panel
+  locked?: boolean; // locked layers can't be moved/selected on the canvas
+  hidden?: boolean; // hidden layers aren't drawn (kept in the project)
 }
 
 export interface TextEl extends BaseEl {
@@ -37,6 +40,15 @@ export interface TextEl extends BaseEl {
   radius: number;
   padX: number;
   padY: number;
+  fontFamily?: string;    // CSS font-family stack
+  shadow?: boolean;
+  shadowColor?: string;
+  shadowBlur?: number;
+  shadowX?: number;
+  shadowY?: number;
+  strokeWidth?: number;   // outline thickness in px (0 = none)
+  strokeColor?: string;
+  curve?: number;         // arc sweep in degrees (0 = straight, +bulge up)
 }
 
 export interface BoxEl extends BaseEl {
@@ -90,6 +102,60 @@ export const STAGE_PRESETS: StagePreset[] = [
   { id: '916', label: 'Story 9:16', w: 1080, h: 1920 },
 ];
 
+/* Web-safe font stacks for the text tool (no external loading needed). */
+export const FONT_OPTIONS: { label: string; value: string }[] = [
+  { label: 'Inter', value: 'Inter, Arial, sans-serif' },
+  { label: 'Arial', value: 'Arial, Helvetica, sans-serif' },
+  { label: 'Georgia', value: 'Georgia, serif' },
+  { label: 'Times', value: '"Times New Roman", Times, serif' },
+  { label: 'Courier', value: '"Courier New", monospace' },
+  { label: 'Impact', value: 'Impact, Charcoal, sans-serif' },
+  { label: 'Trebuchet', value: '"Trebuchet MS", Helvetica, sans-serif' },
+  { label: 'Verdana', value: 'Verdana, Geneva, sans-serif' },
+  { label: 'Comic', value: '"Comic Sans MS", cursive' },
+];
+
+const DEFAULT_FONT = 'Inter, Arial, sans-serif';
+
+/* Lay out characters of a single line along a circular arc so DOM preview and
+ * canvas export match. curveDeg = total sweep in degrees (+ bulges upward). */
+export const curvedCharLayout = (
+  charWidth: (ch: string) => number,
+  text: string,
+  fontSize: number,
+  curveDeg: number,
+) => {
+  const chars = Array.from(text);
+  const widths = chars.map(charWidth);
+  const total = widths.reduce((a, b) => a + b, 0) || 1;
+  const theta = (curveDeg * Math.PI) / 180;
+  const R = Math.abs(theta) < 1e-3 ? Infinity : total / theta;
+  const placed: { ch: string; x: number; y: number; angle: number }[] = [];
+  let acc = 0;
+  let minY = Infinity, maxY = -Infinity, minX = Infinity, maxX = -Infinity;
+  for (let i = 0; i < chars.length; i++) {
+    const s = acc + widths[i] / 2; // arc-length position of char centre
+    acc += widths[i];
+    let x: number, y: number, angle: number;
+    if (!isFinite(R)) {
+      x = s; y = 0; angle = 0;
+    } else {
+      const phi = s / R - theta / 2;
+      x = R * Math.sin(phi);
+      y = R - R * Math.cos(phi); // 0 at apex, grows downward
+      angle = phi;
+    }
+    placed.push({ ch: chars[i], x, y, angle });
+    minX = Math.min(minX, x - fontSize); maxX = Math.max(maxX, x + fontSize);
+    minY = Math.min(minY, y - fontSize / 2); maxY = Math.max(maxY, y + fontSize / 2);
+  }
+  const width = (maxX - minX) || total;
+  const height = (maxY - minY) || fontSize;
+  // shift so the block starts at (0,0)
+  for (const p of placed) { p.x -= minX; p.y -= minY; }
+  return { placed, width, height };
+};
+
 export const STYLE_TOKENS: { token: string; label: string }[] = [
   { token: '{{style_number}}', label: 'Style number' },
   { token: '{{garment_type}}', label: 'Garment type' },
@@ -141,6 +207,7 @@ export const newText = (over: Partial<TextEl> = {}): TextEl => ({
   radius: 0,
   padX: 0,
   padY: 0,
+  fontFamily: DEFAULT_FONT,
   ...over,
 });
 
@@ -474,7 +541,7 @@ export const textBlockHeight = (
   el: TextEl,
   resolvedText: string,
 ): { lines: string[]; height: number } => {
-  ctx.font = `${el.italic ? 'italic ' : ''}${el.fontWeight} ${el.fontSize}px Inter, Arial, sans-serif`;
+  ctx.font = `${el.italic ? 'italic ' : ''}${el.fontWeight} ${el.fontSize}px ${el.fontFamily || 'Inter, Arial, sans-serif'}`;
   try { (ctx as any).letterSpacing = `${el.letterSpacing}px`; } catch { /* noop */ }
   const lines = wrapText(ctx, resolvedText, el.w - el.padX * 2);
   const height = el.padY * 2 + lines.length * el.fontSize * el.lineHeight;
@@ -519,26 +586,67 @@ export const renderPoster = async (opts: RenderOpts): Promise<string> => {
 
     if (el.type === 'text') {
       const resolved = applyTokens(el.text, style);
-      const { lines, height } = textBlockHeight(ctx, el, resolved);
-      const cx = el.x + el.w / 2;
-      const cy = el.y + height / 2;
-      ctx.translate(cx, cy);
-      ctx.rotate(rad);
-      ctx.translate(-el.w / 2, -height / 2);
-      if (el.bg !== 'none') {
-        roundRect(ctx, 0, 0, el.w, height, el.radius);
-        ctx.fillStyle = el.bg;
-        ctx.fill();
+      const fam = el.fontFamily || 'Inter, Arial, sans-serif';
+      const fontStr = `${el.italic ? 'italic ' : ''}${el.fontWeight} ${el.fontSize}px ${fam}`;
+      const applyShadow = () => {
+        if (!el.shadow) return;
+        ctx.shadowColor = el.shadowColor || 'rgba(0,0,0,0.5)';
+        ctx.shadowBlur = el.shadowBlur ?? 6;
+        ctx.shadowOffsetX = el.shadowX ?? 2;
+        ctx.shadowOffsetY = el.shadowY ?? 2;
+      };
+      const clearShadow = () => { ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0; };
+
+      if (el.curve && Math.abs(el.curve) > 0.5) {
+        ctx.font = fontStr;
+        const measure = (ch: string) => ctx.measureText(ch).width + (el.letterSpacing || 0);
+        const { placed, width, height } = curvedCharLayout(measure, resolved, el.fontSize, el.curve);
+        const cx = el.x + el.w / 2;
+        const cy = el.y + height / 2;
+        ctx.translate(cx, cy);
+        ctx.rotate(rad);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        for (const p of placed) {
+          ctx.save();
+          ctx.translate(p.x - width / 2, p.y - height / 2);
+          ctx.rotate(p.angle);
+          if (el.strokeWidth && el.strokeWidth > 0) {
+            ctx.lineWidth = el.strokeWidth; ctx.strokeStyle = el.strokeColor || '#ffffff'; ctx.lineJoin = 'round';
+            applyShadow(); ctx.strokeText(p.ch, 0, 0); clearShadow();
+          }
+          applyShadow();
+          ctx.fillStyle = el.color; ctx.fillText(p.ch, 0, 0); clearShadow();
+          ctx.restore();
+        }
+      } else {
+        const { lines, height } = textBlockHeight(ctx, el, resolved);
+        const cx = el.x + el.w / 2;
+        const cy = el.y + height / 2;
+        ctx.translate(cx, cy);
+        ctx.rotate(rad);
+        ctx.translate(-el.w / 2, -height / 2);
+        if (el.bg !== 'none') {
+          roundRect(ctx, 0, 0, el.w, height, el.radius);
+          ctx.fillStyle = el.bg;
+          ctx.fill();
+        }
+        ctx.font = fontStr;
+        try { (ctx as any).letterSpacing = `${el.letterSpacing}px`; } catch { /* noop */ }
+        ctx.textBaseline = 'top';
+        ctx.textAlign = el.align;
+        const tx = el.align === 'center' ? el.w / 2 : el.align === 'right' ? el.w - el.padX : el.padX;
+        lines.forEach((ln, i) => {
+          const yy = el.padY + i * el.fontSize * el.lineHeight;
+          if (el.strokeWidth && el.strokeWidth > 0) {
+            ctx.lineWidth = el.strokeWidth; ctx.strokeStyle = el.strokeColor || '#ffffff'; ctx.lineJoin = 'round';
+            applyShadow(); ctx.strokeText(ln, tx, yy); clearShadow();
+          }
+          applyShadow();
+          ctx.fillStyle = el.color; ctx.fillText(ln, tx, yy); clearShadow();
+        });
+        try { (ctx as any).letterSpacing = '0px'; } catch { /* noop */ }
       }
-      ctx.fillStyle = el.color;
-      ctx.font = `${el.italic ? 'italic ' : ''}${el.fontWeight} ${el.fontSize}px Inter, Arial, sans-serif`;
-      try { (ctx as any).letterSpacing = `${el.letterSpacing}px`; } catch { /* noop */ }
-      ctx.textBaseline = 'top';
-      ctx.textAlign = el.align;
-      const tx = el.align === 'center' ? el.w / 2 : el.align === 'right' ? el.w - el.padX : el.padX;
-      lines.forEach((ln, i) => {
-        ctx.fillText(ln, tx, el.padY + i * el.fontSize * el.lineHeight);
-      });
     } else if (el.type === 'box') {
       const cx = el.x + el.w / 2;
       const cy = el.y + el.h / 2;

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Order, MaterialRequest, SizeBreakdown, Style, ConsumptionType, Attachment } from '../../types';
 import { X, Trash2, Calculator, ArrowLeftRight, Check, Plus, Paperclip, Files, Loader2, Zap, Info, FileText } from 'lucide-react';
-import { uploadOrderAttachment, createMaterialRequest, updateMaterialRequest, fetchStyleByNumber, createProcurement, notifyMaterialRequisition } from '../../services/db';
+import { uploadOrderAttachment, createMaterialRequest, updateMaterialRequest, fetchStyleByNumber, createProcurement, notifyMaterialRequisition, fetchMaterialRequestsForOrder } from '../../services/db';
 import { MaterialStage } from '../../types';
 
 interface MaterialRow {
@@ -27,7 +27,7 @@ interface ForecastedItem {
 }
 
 interface MaterialRequestModalProps {
-  orderId: string;
+  orderId: string | null;
   orderNo: string;
   orders: Order[];
   onClose: () => void;
@@ -46,9 +46,10 @@ export const MaterialRequestModal: React.FC<MaterialRequestModalProps> = ({
   onRefresh
 }) => {
   const order = orders.find(o => o.id === orderId);
+  const isAdhoc = !orderId;
   const initialQty = order ? order.quantity : 0;
   
-  const [reqTab, setReqTab] = useState<'direct' | 'pcs' | 'forecast'>(isEditingRequest ? 'direct' : 'forecast');
+  const [reqTab, setReqTab] = useState<'direct' | 'pcs' | 'forecast'>(isEditingRequest || isAdhoc ? 'direct' : 'forecast');
   const [linkedStyle, setLinkedStyle] = useState<Style | null>(null);
   const [isStyleLoading, setIsStyleLoading] = useState(false);
   
@@ -67,6 +68,21 @@ export const MaterialRequestModal: React.FC<MaterialRequestModalProps> = ({
   
   // Forecast specific state
   const [forecastItems, setForecastItems] = useState<ForecastedItem[]>([]);
+
+  // Quantities already requested for THIS order, keyed by material content, so we
+  // can warn (and allow override) when someone re-requests the same forecasted item.
+  const [alreadyRequested, setAlreadyRequested] = useState<Record<string, number>>({});
+  useEffect(() => {
+    if (!orderId) { setAlreadyRequested({}); return; }
+    fetchMaterialRequestsForOrder(orderId).then(reqs => {
+      const map: Record<string, number> = {};
+      for (const r of reqs) {
+        if (isEditingRequest && r.id === isEditingRequest.id) continue; // ignore the row being edited
+        map[r.material_content] = (map[r.material_content] || 0) + (r.quantity_requested || 0);
+      }
+      setAlreadyRequested(map);
+    }).catch(() => setAlreadyRequested({}));
+  }, [orderId, isEditingRequest]);
 
   // Fetch Style and calculate forecast
   useEffect(() => {
@@ -213,16 +229,16 @@ export const MaterialRequestModal: React.FC<MaterialRequestModalProps> = ({
     // Mirror a new requisition into the materials procurement pipeline (Requested stage)
     // so the Accessories/Materials desk sees it immediately. Never blocks the request.
     const pushToProcurement = async (material_name: string, quantity: number, unit: string) => {
-      if (!styleRef || quantity <= 0) return;
+      if (quantity <= 0) return;
       try {
         await createProcurement({
           order_id: orderId,
-          style_number: styleRef,
+          style_number: styleRef || 'GENERAL',
           material_name,
           unit,
           total_quantity: quantity,
           startStage: MaterialStage.REQUESTED,
-          note: `Auto-requisition from sub-unit (${orderNo})`,
+          note: isAdhoc ? 'Ad-hoc requisition from sub-unit (no order)' : `Auto-requisition from sub-unit (${orderNo})`,
         });
       } catch (err) {
         console.error('procurement sync failed', err);
@@ -242,6 +258,11 @@ export const MaterialRequestModal: React.FC<MaterialRequestModalProps> = ({
         }
         for (const item of toSync) {
           const content = `${item.name} (${item.label})`;
+          const prior = alreadyRequested[content] || 0;
+          if (prior > 0) {
+            const ok = window.confirm(`"${content}" already has ${prior} ${item.unit} requested for this order.\n\nRequest ${item.calc} more anyway?`);
+            if (!ok) continue;
+          }
           await createMaterialRequest({ 
             order_id: orderId, 
             material_content: content, 
@@ -274,7 +295,7 @@ export const MaterialRequestModal: React.FC<MaterialRequestModalProps> = ({
       // Fire-and-forget notification for newly raised requisitions only.
       if (raisedItems.length) {
         notifyMaterialRequisition({
-          orderNo,
+          orderNo: orderNo || 'General Requisition',
           styleNumber: styleRef || undefined,
           items: raisedItems,
         }).catch(() => {});
@@ -299,25 +320,29 @@ export const MaterialRequestModal: React.FC<MaterialRequestModalProps> = ({
             <h3 className="text-2xl font-black flex items-center gap-2">
               <Calculator size={28}/> Accessories Requisition
             </h3>
-            <p className="text-blue-100 text-sm font-bold opacity-80 mt-1 uppercase tracking-widest">Order: {orderNo}</p>
+            <p className="text-blue-100 text-sm font-bold opacity-80 mt-1 uppercase tracking-widest">{isAdhoc ? 'General Requisition · No order' : `Order: ${orderNo}`}</p>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-white/20 rounded-full transition-colors"><X size={28} /></button>
         </div>
 
         <div className="p-8 space-y-6 overflow-y-auto flex-1 bg-slate-50/50">
           <div className="flex bg-slate-200 p-1.5 rounded-xl w-fit shadow-inner">
+            {!isAdhoc && (
             <button 
               onClick={() => setReqTab('forecast')} 
               className={`flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-black transition-all ${reqTab === 'forecast' ? 'bg-white text-indigo-600 shadow-lg scale-105' : 'text-slate-500 hover:text-slate-700'}`}
             >
               <Zap size={16}/> Forecast Sync
             </button>
+            )}
+            {!isAdhoc && (
             <button 
               onClick={() => setReqTab('pcs')} 
               className={`flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-black transition-all ${reqTab === 'pcs' ? 'bg-white text-indigo-600 shadow-lg scale-105' : 'text-slate-500 hover:text-slate-700'}`}
             >
               <Calculator size={16}/> Calculator Mode
             </button>
+            )}
             <button 
               onClick={() => setReqTab('direct')} 
               className={`flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-black transition-all ${reqTab === 'direct' ? 'bg-white text-indigo-600 shadow-lg scale-105' : 'text-slate-500 hover:text-slate-700'}`}
@@ -387,6 +412,11 @@ export const MaterialRequestModal: React.FC<MaterialRequestModalProps> = ({
                           </td>
                           <td className="p-4">
                             <span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-2 py-1 rounded-full uppercase tracking-tighter">{item.label}</span>
+                            {(alreadyRequested[`${item.name} (${item.label})`] || 0) > 0 && (
+                              <div className="mt-1.5 inline-flex items-center gap-1 text-[10px] font-black text-amber-700 bg-amber-100 border border-amber-200 px-2 py-1 rounded-full" title="This item was already requested for this order">
+                                <Info size={11}/> Already requested {alreadyRequested[`${item.name} (${item.label})`]}
+                              </div>
+                            )}
                           </td>
                           <td className="p-4 text-center">
                             <span className="font-black text-indigo-600 text-lg">{item.calc}</span>

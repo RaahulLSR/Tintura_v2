@@ -31,8 +31,9 @@ export const MaterialHistoryModal: React.FC<MaterialHistoryModalProps> = ({
   };
 
   const grouped = history.reduce((acc, req) => {
-    if (!acc[req.order_id]) acc[req.order_id] = [];
-    acc[req.order_id].push(req);
+    const key = req.order_id || '__adhoc__';
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(req);
     return acc;
   }, {} as Record<string, MaterialRequest[]>);
 
@@ -53,6 +54,7 @@ export const MaterialHistoryModal: React.FC<MaterialHistoryModalProps> = ({
             // Added type assertion to Object.entries for correct inference of reqs as MaterialRequest[]
             (Object.entries(grouped) as [string, MaterialRequest[]][]).map(([orderId, reqs]) => {
               const order = orders.find(o => o.id === orderId);
+              const isAdhoc = orderId === '__adhoc__';
               const isExpanded = expandedOrders.includes(orderId);
               return (
                 <div key={orderId} className="mb-4 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
@@ -62,8 +64,8 @@ export const MaterialHistoryModal: React.FC<MaterialHistoryModalProps> = ({
                   >
                     <div className="flex items-center gap-3">
                       {isExpanded ? <ChevronDown size={18} className="text-slate-500" /> : <ChevronRight size={18} className="text-slate-500" />}
-                      <span className="font-bold text-slate-700 text-sm uppercase">Order #{order?.order_no || 'Unknown'}</span>
-                      <span className="text-xs text-slate-500 bg-white px-2 py-0.5 rounded border border-slate-300">Style: {order?.style_number}</span>
+                      <span className="font-bold text-slate-700 text-sm uppercase">{isAdhoc ? 'General Requisition (No order)' : `Order #${order?.order_no || 'Unknown'}`}</span>
+                      {!isAdhoc && <span className="text-xs text-slate-500 bg-white px-2 py-0.5 rounded border border-slate-300">Style: {order?.style_number}</span>}
                       <span className="text-xs font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{reqs.length} Req(s)</span>
                     </div>
                     <div className="flex items-center gap-2">

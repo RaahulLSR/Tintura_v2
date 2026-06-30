@@ -85,6 +85,8 @@ export interface Order {
   material_forecast?: DetailedRequirement[];
   description: string;
   qc_notes?: string; 
+  ai_issue_summary?: string | null;
+  ai_issue_summary_generated_at?: string | null;
   target_delivery_date: string; 
   status: OrderStatus;
   created_at?: string;
@@ -186,7 +188,7 @@ export interface BulkEditHistory {
 
 export interface MaterialRequest {
   id: string;
-  order_id: string;
+  order_id?: string | null; // null/undefined = ad-hoc requisition not tied to an order
   requested_by_name?: string; 
   material_content: string;
   quantity_requested: number;
@@ -234,6 +236,11 @@ export const MATERIAL_STAGE_LABEL: Record<MaterialStage, string> = {
 export const prevMaterialStage = (stage: MaterialStage): MaterialStage | null => {
   const i = MATERIAL_STAGE_ORDER.indexOf(stage);
   return i > 0 ? MATERIAL_STAGE_ORDER[i - 1] : null;
+};
+
+export const nextMaterialStage = (stage: MaterialStage): MaterialStage | null => {
+  const i = MATERIAL_STAGE_ORDER.indexOf(stage);
+  return i >= 0 && i < MATERIAL_STAGE_ORDER.length - 1 ? MATERIAL_STAGE_ORDER[i + 1] : null;
 };
 
 export interface MaterialProcurement {

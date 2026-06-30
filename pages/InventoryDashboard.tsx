@@ -1,20 +1,24 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { fetchStyles, fetchStockLevels } from '../services/db';
-import { Style, StockLevel } from '../types';
+import { fetchStyles, fetchStockLevels, fetchOrders } from '../services/db';
+import { Style, StockLevel, Order, OrderStatus } from '../types';
 import { sizeLabelParts } from '../services/sizes';
-import { Package, Search, RefreshCcw, Boxes, Layers, Palette } from 'lucide-react';
+import { useAuth } from '../components/Layout';
+import { Package, Search, RefreshCcw, Boxes, Layers, Palette, Factory } from 'lucide-react';
 
 export const InventoryDashboard: React.FC = () => {
+  const { user } = useAuth();
   const [styles, setStyles] = useState<Style[]>([]);
   const [stock, setStock] = useState<StockLevel[]>([]);
+  const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
 
   const load = async () => {
     setLoading(true);
-    const [s, lv] = await Promise.all([fetchStyles(), fetchStockLevels()]);
+    const [s, lv, o] = await Promise.all([fetchStyles(), fetchStockLevels(), fetchOrders()]);
     setStyles(s);
     setStock(lv);
+    setOrders(o);
     setLoading(false);
   };
 
@@ -36,6 +40,15 @@ export const InventoryDashboard: React.FC = () => {
     () => new Set(stock.filter(r => r.quantity > 0).map(r => r.style_number)).size,
     [stock]
   );
+
+  // In production = orders not yet completed/committed to stock, grouped by style.
+  const inProduction = useMemo(() => {
+    const open = orders.filter(o => o.status !== OrderStatus.COMPLETED);
+    const byStyle: Record<string, number> = {};
+    for (const o of open) byStyle[o.style_number] = (byStyle[o.style_number] || 0) + (Number(o.quantity) || 0);
+    const totalUnits = Object.values(byStyle).reduce((a, n) => a + n, 0);
+    return { byStyle, totalUnits, orderCount: open.length, styleCount: Object.keys(byStyle).length };
+  }, [orders]);
 
   // Merge in any style_number that has stock but is NOT in the Style master,
   // so committed inventory always shows up even without a master record.
@@ -92,11 +105,38 @@ export const InventoryDashboard: React.FC = () => {
         </button>
       </div>
 
+      {/* Personalized banner */}
+      <div className="card card-pad bg-gradient-to-r from-brand-50 to-white border-brand-200">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h2 className="text-base font-bold text-slate-900">Hi {(user?.full_name || user?.username || 'there').split(' ')[0]} 👋</h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {totalUnits.toLocaleString()} units finished and on the shelf · {inProduction.totalUnits.toLocaleString()} still being produced.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex flex-col items-center px-3 py-1.5 rounded-xl bg-emerald-50">
+              <span className="text-lg font-black text-emerald-700">{totalUnits.toLocaleString()}</span>
+              <span className="text-[10px] font-bold text-emerald-600 uppercase">On hand</span>
+            </div>
+            <div className="flex flex-col items-center px-3 py-1.5 rounded-xl bg-amber-50">
+              <span className="text-lg font-black text-amber-700">{inProduction.totalUnits.toLocaleString()}</span>
+              <span className="text-[10px] font-bold text-amber-600 uppercase">In production</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <div className="stat-card">
           <div className="flex items-center gap-2 text-slate-500"><Boxes size={16} /><span className="stat-label">Total Units in Stock</span></div>
           <span className="stat-value">{totalUnits.toLocaleString()}</span>
+        </div>
+        <div className="stat-card">
+          <div className="flex items-center gap-2 text-slate-500"><Factory size={16} /><span className="stat-label">In Production</span></div>
+          <span className="stat-value">{inProduction.totalUnits.toLocaleString()}</span>
+          <span className="text-[11px] text-slate-400 mt-0.5">{inProduction.orderCount} open order{inProduction.orderCount === 1 ? '' : 's'}</span>
         </div>
         <div className="stat-card">
           <div className="flex items-center gap-2 text-slate-500"><Layers size={16} /><span className="stat-label">Styles in Stock</span></div>
@@ -134,6 +174,7 @@ export const InventoryDashboard: React.FC = () => {
               ? style.available_sizes
               : Array.from(new Set(Object.values(stockMap[style.style_number] || {}).flatMap(c => Object.keys(c))));
             const total = styleTotal(style.style_number);
+            const producing = inProduction.byStyle[style.style_number] || 0;
 
             return (
               <div key={style.id} className="card overflow-hidden">
@@ -142,9 +183,16 @@ export const InventoryDashboard: React.FC = () => {
                     <span className="font-bold text-slate-900">{style.style_number}</span>
                     {style.category && <span className="ml-2 text-xs text-slate-500">{style.category}</span>}
                   </div>
-                  <span className={`badge ${total > 0 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>
-                    {total.toLocaleString()} units
-                  </span>
+                  <div className="flex items-center gap-2">
+                    {producing > 0 && (
+                      <span className="badge bg-amber-50 text-amber-700 border-amber-200 inline-flex items-center gap-1">
+                        <Factory size={11} /> {producing.toLocaleString()} in production
+                      </span>
+                    )}
+                    <span className={`badge ${total > 0 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>
+                      {total.toLocaleString()} units
+                    </span>
+                  </div>
                 </div>
 
                 {colors.length === 0 || sizes.length === 0 ? (

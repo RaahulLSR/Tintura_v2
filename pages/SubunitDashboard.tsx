@@ -1,6 +1,6 @@
 
 import React, { useEffect, useState } from 'react';
-import { fetchOrders, updateOrderStatus, fetchMaterialRequests, deleteMaterialRequest, triggerMaterialEmail, fetchOrderLogs, addOrderLog, fetchStyleByNumber, fetchStyleTemplate, fetchOrderStockCommits, commitOrderStock, undoOrderStockCommit, deliverCompletionReport } from '../services/db';
+import { fetchOrders, updateOrderStatus, updateOrderCompletionBreakdown, fetchMaterialRequests, deleteMaterialRequest, triggerMaterialEmail, fetchOrderLogs, addOrderLog, fetchStyleByNumber, fetchStyleTemplate, fetchOrderStockCommits, commitOrderStock, undoOrderStockCommit, deliverCompletionReport } from '../services/db';
 import { Order, OrderStatus, getNextOrderStatus, SizeBreakdown, MaterialRequest, OrderLog, MaterialStatus, formatOrderNumber, Style, ConsumptionType, Attachment, OrderStockCommit, StockCommitLine, getSizeKeyFromLabel } from '../types';
 import { StatusBadge, BulkActionToolbar } from '../components/Widgets';
 import { ArrowRight, Printer, PackagePlus, Box, AlertTriangle, Eye, CheckCircle2, History, ListTodo, Archive, Clock, Search, Mail, Loader2, Info, Boxes } from 'lucide-react';
@@ -14,6 +14,7 @@ import { StockCommitModal } from '../components/subunit/StockCommitModal';
 import { useAuth } from '../components/Layout';
 
 const CURRENT_UNIT_ID = 2; // Sewing Unit A
+const ADHOC_REQ_ID = '__adhoc__'; // sentinel: open requisition modal not tied to an order
 
 interface RequirementDetail {
   label: string;
@@ -41,8 +42,7 @@ export const SubunitDashboard: React.FC = () => {
   
   const [detailsModal, setDetailsModal] = useState<Order | null>(null);
   const [timelineModal, setTimelineModal] = useState<{orderId: string, orderNo: string} | null>(null);
-  const [materialModal, setMaterialModal] = useState<string | null>(null);
-  const [showMaterialHistory, setShowMaterialHistory] = useState(false);
+  const [materialModal, setMaterialModal] = useState<string | null>(null);  const [showMaterialHistory, setShowMaterialHistory] = useState(false);
 
   const [stockModalOrder, setStockModalOrder] = useState<Order | null>(null);
   const [orderCommits, setOrderCommits] = useState<OrderStockCommit[]>([]);
@@ -181,21 +181,27 @@ export const SubunitDashboard: React.FC = () => {
           const commits = await fetchOrderStockCommits(stockModalOrder.id);
           setOrderCommits(commits);
 
-          // The first commit also completes the order. Its completion breakdown
-          // is derived from the committed pieces (cumulative across commits).
-          if (stockModalOrder.status !== OrderStatus.COMPLETED) {
-              const breakdown = buildCompletionFromCommits(stockModalOrder, commits);
-              const boxCount = stockModalOrder.actual_box_count ?? stockModalOrder.box_count ?? 0;
+          // Every commit cascades into the order summary. The completion
+          // breakdown is always recomputed from ALL non-undone commits so
+          // multi-batch commits stay accurate (not just the first batch).
+          const breakdown = buildCompletionFromCommits(stockModalOrder, commits);
+          const boxCount = stockModalOrder.actual_box_count ?? stockModalOrder.box_count ?? 0;
+          const firstCompletion = stockModalOrder.status !== OrderStatus.COMPLETED;
+          if (firstCompletion) {
               await updateOrderStatus(stockModalOrder.id, OrderStatus.COMPLETED, undefined, {
                   completion_breakdown: breakdown,
                   actual_box_count: boxCount,
               });
-              setStockModalOrder({
-                  ...stockModalOrder,
-                  status: OrderStatus.COMPLETED,
-                  completion_breakdown: breakdown,
-                  actual_box_count: boxCount,
-              });
+          } else {
+              await updateOrderCompletionBreakdown(stockModalOrder.id, breakdown, boxCount);
+          }
+          setStockModalOrder({
+              ...stockModalOrder,
+              status: OrderStatus.COMPLETED,
+              completion_breakdown: breakdown,
+              actual_box_count: boxCount,
+          });
+          if (firstCompletion) {
               // Deliver the order completion report to Admin's Tintura SST inbox + email.
               deliverCompletionReport({
                   ...stockModalOrder,
@@ -217,7 +223,15 @@ export const SubunitDashboard: React.FC = () => {
       setStockSaving(true);
       try {
           await undoOrderStockCommit(commit);
-          if (stockModalOrder) setOrderCommits(await fetchOrderStockCommits(stockModalOrder.id));
+          if (stockModalOrder) {
+              const commits = await fetchOrderStockCommits(stockModalOrder.id);
+              setOrderCommits(commits);
+              // Cascade the undo into the order summary too.
+              const breakdown = buildCompletionFromCommits(stockModalOrder, commits);
+              await updateOrderCompletionBreakdown(stockModalOrder.id, breakdown);
+              setStockModalOrder({ ...stockModalOrder, completion_breakdown: breakdown });
+              refreshOrders();
+          }
       } catch (err: any) {
           alert(err?.message || 'Failed to undo commit.');
       } finally {
@@ -228,7 +242,7 @@ export const SubunitDashboard: React.FC = () => {
   const handleOpenMaterialHistory = async () => {
       const allRequests = await fetchMaterialRequests();
       const unitOrderIds = orders.map(o => o.id);
-      setMaterialHistory(allRequests.filter(req => unitOrderIds.includes(req.order_id)));
+      setMaterialHistory(allRequests.filter(req => !req.order_id || unitOrderIds.includes(req.order_id)));
       setShowMaterialHistory(true);
   };
 
@@ -240,7 +254,7 @@ export const SubunitDashboard: React.FC = () => {
 
   const handleEditRequest = (req: MaterialRequest) => {
       setIsEditingRequest({ id: req.id, originalData: req });
-      setMaterialModal(req.order_id);
+      setMaterialModal(req.order_id || ADHOC_REQ_ID);
       setShowMaterialHistory(false);
   };
 
@@ -596,6 +610,7 @@ export const SubunitDashboard: React.FC = () => {
     <div className="space-y-6">
       <div className="flex flex-col xl:flex-row xl:justify-between xl:items-center gap-4">
         <div>
+            <p className="text-sm font-bold text-indigo-600 mb-1">Hi {actor.split(' ')[0]} 👋</p>
             <h2 className="text-3xl font-black text-slate-800 flex items-center gap-3">
               <div className="p-2 bg-indigo-600 text-white rounded-xl shadow-lg shadow-indigo-200">
                 <Box size={28}/> 
@@ -617,6 +632,7 @@ export const SubunitDashboard: React.FC = () => {
                 <Search className="absolute left-4 top-3.5 text-slate-400" size={18} />
             </div>
             <button onClick={handleOpenMaterialHistory} className="bg-white border border-slate-200 text-slate-700 px-5 py-3 rounded-xl flex items-center gap-2 font-bold hover:bg-slate-50 shadow-sm transition-all active:scale-95"><Archive size={20} className="text-indigo-600"/><span>Req History</span></button>
+            <button onClick={() => { setIsEditingRequest(null); setMaterialModal(ADHOC_REQ_ID); }} className="bg-white border border-amber-200 text-amber-700 px-5 py-3 rounded-xl flex items-center gap-2 font-bold hover:bg-amber-50 shadow-sm transition-all active:scale-95" title="Raise a requisition not tied to any order"><PackagePlus size={20} className="text-amber-600"/><span>General Req</span></button>
             <div className="bg-white p-1.5 rounded-xl border border-slate-200 shadow-sm flex gap-1">
                 <button onClick={() => setActiveTab('active')} className={`flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-bold transition-all ${activeTab === 'active' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}><ListTodo size={18}/> Active</button>
                 <button onClick={() => setActiveTab('history')} className={`flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-bold transition-all ${activeTab === 'history' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}><History size={18}/> Completed</button>
@@ -744,8 +760,8 @@ export const SubunitDashboard: React.FC = () => {
 
       {materialModal && (
         <MaterialRequestModal 
-          orderId={materialModal} 
-          orderNo={orders.find(o => o.id === materialModal) ? formatOrderNumber(orders.find(o => o.id === materialModal)!) : ''} 
+          orderId={materialModal === ADHOC_REQ_ID ? null : materialModal} 
+          orderNo={materialModal !== ADHOC_REQ_ID && orders.find(o => o.id === materialModal) ? formatOrderNumber(orders.find(o => o.id === materialModal)!) : ''} 
           orders={orders} 
           onClose={() => setMaterialModal(null)} 
           isEditingRequest={isEditingRequest} 

@@ -179,9 +179,12 @@ export const AdminDashboard: React.FC = () => {
   return (
     <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4">
-        <h2 className="text-3xl font-black text-slate-800 tracking-tight">
-          {activeTab === 'overview' ? 'Executive Dashboard' : activeTab === 'completed' ? 'Completed Orders' : 'Analytics & Reports'}
-        </h2>
+        <div>
+          <p className="text-sm font-bold text-indigo-600">Hi {actor.split(' ')[0]} 👋</p>
+          <h2 className="text-3xl font-black text-slate-800 tracking-tight">
+            {activeTab === 'overview' ? 'Executive Dashboard' : activeTab === 'completed' ? 'Completed Orders' : 'Analytics & Reports'}
+          </h2>
+        </div>
         <div className="flex items-center gap-3">
             <div className="bg-white p-1 rounded-xl border border-slate-200 shadow-sm flex gap-1">
                 <button onClick={() => setActiveTab('overview')} className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-bold transition-all ${activeTab === 'overview' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}><BarChart3 size={18}/> Overview</button>

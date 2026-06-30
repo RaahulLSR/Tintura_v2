@@ -5,6 +5,7 @@ export { supabase };
 // Added formatOrderNumber to the imports from types
 import { Order, OrderStatus, MaterialRequest, Unit, MaterialStatus, Invoice, SizeBreakdown, AppUser, UserRole, StockCommit, StockLevel, MaterialApproval, OrderLog, Attachment, Style, StyleTemplate, BulkEditHistory, formatOrderNumber, DetailedRequirement, ConsumptionType, getSizeKeyFromLabel, normalizeSize, MaterialProcurement, MaterialMovement, MaterialStage, MATERIAL_STAGE_ORDER, prevMaterialStage, OrderStockCommit, StockCommitLine, SalesOrder, SalesOrderLine, Buyer, POSTER_KEY } from '../types.js';
 import { sizesEqual } from './sizes.js';
+import { generateOrderIssueSummary } from './issueSummary.js';
 
 const API_BASE = (typeof window !== 'undefined' && (window.location.protocol === 'file:' || window.location.hostname === 'localhost'))
   ? 'https://tintura-mail.vercel.app'
@@ -282,6 +283,24 @@ export const updateOrderStatus = async (orderId: string, status: OrderStatus, no
    if (qcAttachmentUrl) payload.qc_attachment_url = qcAttachmentUrl;
    await supabase.from('orders').update(payload).eq('id', orderId);
    await addOrderLog(orderId, 'STATUS_CHANGE', `Status: ${status}${notes ? ` - ${notes}` : ''}`);
+   if (status === OrderStatus.COMPLETED) {
+       generateOrderIssueSummary(orderId).catch((err) => {
+           console.warn('AI issue summary generation failed:', err);
+       });
+   }
+};
+
+// Silently refresh an order's completion breakdown (and optionally box count)
+// without flipping status or writing a status-change log. Used so that EVERY
+// stock commit / undo cascades into the order summary, not just the first one.
+export const updateOrderCompletionBreakdown = async (
+   orderId: string,
+   completion_breakdown: SizeBreakdown[],
+   actual_box_count?: number,
+): Promise<void> => {
+   const payload: any = { completion_breakdown };
+   if (actual_box_count !== undefined) payload.actual_box_count = actual_box_count;
+   await supabase.from('orders').update(payload).eq('id', orderId);
 };
 
 // --- Other Services ---
@@ -561,9 +580,17 @@ export const fetchMaterialRequests = async (): Promise<MaterialRequest[]> => {
     return data as MaterialRequest[];
 };
 
+// Requests already raised for a single order — used to warn about
+// double-requesting the same forecasted material.
+export const fetchMaterialRequestsForOrder = async (orderId: string): Promise<MaterialRequest[]> => {
+    const { data, error } = await supabase.from('material_requests').select('*').eq('order_id', orderId).order('created_at', { ascending: false });
+    if (error || !data) return [];
+    return data as MaterialRequest[];
+};
+
 export const createMaterialRequest = async (req: Partial<MaterialRequest>) => {
     await supabase.from('material_requests').insert([{
-        order_id: req.order_id,
+        order_id: req.order_id || null,
         material_content: req.material_content,
         quantity_requested: req.quantity_requested,
         unit: req.unit || 'Nos',
@@ -1004,6 +1031,58 @@ export const advanceProcurement = async (
         qty: moveQty,
         invoice_no: opts.invoice_no || null,
         note: opts.note || null,
+        created_by_name: opts.created_by_name || null,
+    }]);
+
+    return updated as MaterialProcurement;
+};
+
+/**
+ * Correction / step-back: move quantity from a stage BACK to the previous one
+ * (e.g. something was marked Received by mistake → pull it back to Ordered).
+ * This is the reverse of advanceProcurement and records a movement so the audit
+ * trail stays honest. Returns the updated procurement line.
+ */
+export const regressProcurement = async (
+    procurementId: string,
+    qty: number,
+    fromStage: MaterialStage,
+    opts: { note?: string; created_by_name?: string } = {}
+): Promise<MaterialProcurement> => {
+    const moveQty = Number(qty) || 0;
+    if (moveQty <= 0) throw new Error('Move quantity must be greater than zero.');
+
+    const toStage = prevMaterialStage(fromStage);
+    if (!toStage) throw new Error(`${fromStage} cannot be stepped back any further.`);
+
+    const { data: proc, error: fetchErr } = await supabase
+        .from('material_procurements').select('*').eq('id', procurementId).single();
+    if (fetchErr || !proc) throw new Error('Procurement not found.');
+
+    const fromCol = STAGE_QTY_COLUMN[fromStage];
+    const toCol = STAGE_QTY_COLUMN[toStage];
+    const available = Number(proc[fromCol]) || 0;
+    if (moveQty > available) {
+        throw new Error(`Only ${available} ${proc.unit} are at the ${fromStage} stage; cannot pull back ${moveQty}.`);
+    }
+
+    const updates: Record<string, any> = {
+        [fromCol]: available - moveQty,
+        [toCol]: (Number(proc[toCol]) || 0) + moveQty,
+        updated_at: new Date().toISOString(),
+    };
+
+    const { data: updated, error: updErr } = await supabase
+        .from('material_procurements').update(updates).eq('id', procurementId).select().single();
+    if (updErr || !updated) throw new Error(updErr?.message || 'Failed to correct procurement.');
+
+    await supabase.from('material_movements').insert([{
+        procurement_id: procurementId,
+        from_stage: fromStage,
+        to_stage: toStage,
+        qty: moveQty,
+        invoice_no: null,
+        note: opts.note || 'Correction (stepped back)',
         created_by_name: opts.created_by_name || null,
     }]);
 

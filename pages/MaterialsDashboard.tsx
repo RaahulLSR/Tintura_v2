@@ -4,6 +4,7 @@ import {
   fetchProcurementMovements,
   createProcurement,
   advanceProcurement,
+  regressProcurement,
   fetchOrders,
   fetchOrderStockCommits,
 } from '../services/db';
@@ -23,7 +24,7 @@ import {
 import { useAuth } from '../components/Layout';
 import {
   Package, Plus, RefreshCcw, Search, X, Clock, FileText, ArrowRight, Mic, AlertCircle,
-  ChevronRight, ArrowLeft, CheckCircle2, Layers, PackageCheck,
+  ChevronRight, ArrowLeft, CheckCircle2, Layers, PackageCheck, Undo2,
 } from 'lucide-react';
 
 const STAGE_COLOR: Record<MaterialStage, string> = {
@@ -67,6 +68,7 @@ export const MaterialsDashboard: React.FC = () => {
 
   const [showCreate, setShowCreate] = useState(false);
   const [advanceTarget, setAdvanceTarget] = useState<{ p: MaterialProcurement; to: MaterialStage } | null>(null);
+  const [regressTarget, setRegressTarget] = useState<{ p: MaterialProcurement; from: MaterialStage } | null>(null);
   const [timelineFor, setTimelineFor] = useState<MaterialProcurement | null>(null);
 
   const load = async () => {
@@ -157,6 +159,36 @@ export const MaterialsDashboard: React.FC = () => {
         </div>
       </div>
 
+      {/* Personalized focus banner */}
+      <div className="card card-pad bg-gradient-to-r from-brand-50 to-white border-brand-200">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h2 className="text-base font-bold text-slate-900">Hi {actor.split(' ')[0]} 👋</h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {rollup[MaterialStage.REQUESTED] + rollup[MaterialStage.ORDERED] + rollup[MaterialStage.RECEIVED] === 0
+                ? 'Nothing pending — every procurement line is released to the floor.'
+                : 'Here is what is waiting on the materials desk right now.'}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex flex-col items-center px-3 py-1.5 rounded-xl bg-slate-100">
+              <span className="text-lg font-black text-slate-700">{rollup[MaterialStage.REQUESTED].toLocaleString()}</span>
+              <span className="text-[10px] font-bold text-slate-500 uppercase">To order</span>
+            </div>
+            <ArrowRight size={14} className="text-slate-300" />
+            <div className="flex flex-col items-center px-3 py-1.5 rounded-xl bg-amber-50">
+              <span className="text-lg font-black text-amber-700">{rollup[MaterialStage.ORDERED].toLocaleString()}</span>
+              <span className="text-[10px] font-bold text-amber-600 uppercase">Awaiting receipt</span>
+            </div>
+            <ArrowRight size={14} className="text-slate-300" />
+            <div className="flex flex-col items-center px-3 py-1.5 rounded-xl bg-sky-50">
+              <span className="text-lg font-black text-sky-700">{rollup[MaterialStage.RECEIVED].toLocaleString()}</span>
+              <span className="text-[10px] font-bold text-sky-600 uppercase">To release</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Voice hint */}
       <div className="card card-pad flex items-start gap-3 border-brand-200 bg-brand-50/40">
         <Mic className="text-brand-600 shrink-0 mt-0.5" size={18} />
@@ -202,7 +234,7 @@ export const MaterialsDashboard: React.FC = () => {
                 ) : (
                   <div className="space-y-3">
                     {open.map((p) => (
-                      <ProcurementLineCard key={p.id} p={p} ord={orderLabel(p.order_id)} canEdit={canEdit} onTimeline={() => setTimelineFor(p)} onAdvance={(to) => setAdvanceTarget({ p, to })} />
+                      <ProcurementLineCard key={p.id} p={p} ord={orderLabel(p.order_id)} canEdit={canEdit} onTimeline={() => setTimelineFor(p)} onAdvance={(to) => setAdvanceTarget({ p, to })} onRegress={(from) => setRegressTarget({ p, from })} />
                     ))}
                   </div>
                 )}
@@ -216,7 +248,7 @@ export const MaterialsDashboard: React.FC = () => {
                 ) : (
                   <div className="space-y-3">
                     {issued.map((p) => (
-                      <ProcurementLineCard key={p.id} p={p} ord={orderLabel(p.order_id)} canEdit={canEdit} onTimeline={() => setTimelineFor(p)} onAdvance={(to) => setAdvanceTarget({ p, to })} />
+                      <ProcurementLineCard key={p.id} p={p} ord={orderLabel(p.order_id)} canEdit={canEdit} onTimeline={() => setTimelineFor(p)} onAdvance={(to) => setAdvanceTarget({ p, to })} onRegress={(from) => setRegressTarget({ p, from })} />
                     ))}
                   </div>
                 )}
@@ -304,6 +336,15 @@ export const MaterialsDashboard: React.FC = () => {
           onSaved={() => { setAdvanceTarget(null); load(); }}
         />
       )}
+      {regressTarget && (
+        <RegressModal
+          p={regressTarget.p}
+          from={regressTarget.from}
+          actor={actor}
+          onClose={() => setRegressTarget(null)}
+          onSaved={() => { setRegressTarget(null); load(); }}
+        />
+      )}
       {timelineFor && <TimelineModal p={timelineFor} onClose={() => setTimelineFor(null)} />}
     </div>
   );
@@ -360,7 +401,8 @@ const ProcurementLineCard: React.FC<{
   canEdit: boolean;
   onTimeline: () => void;
   onAdvance: (to: MaterialStage) => void;
-}> = ({ p, ord, canEdit, onTimeline, onAdvance }) => (
+  onRegress: (from: MaterialStage) => void;
+}> = ({ p, ord, canEdit, onTimeline, onAdvance, onRegress }) => (
   <div className="card card-pad">
     <div className="flex items-start justify-between gap-4 flex-wrap">
       <div className="min-w-0">
@@ -413,6 +455,23 @@ const ProcurementLineCard: React.FC<{
         })}
       </div>
     )}
+
+    {canEdit && (() => {
+      // Correction row: pull a quantity back a stage if it was advanced by mistake.
+      const backable = [MaterialStage.ORDERED, MaterialStage.RECEIVED, MaterialStage.RELEASED]
+        .filter((from) => procurementStageQty(p, from) > 0);
+      if (!backable.length) return null;
+      return (
+        <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-2">
+          <span className="text-[11px] font-semibold text-slate-400 inline-flex items-center gap-1"><Undo2 size={12} /> Correct:</span>
+          {backable.map((from) => (
+            <button key={from} onClick={() => onRegress(from)} className="btn-ghost btn-sm text-amber-700 hover:bg-amber-50">
+              {MATERIAL_STAGE_LABEL[from]} <ArrowLeft size={12} /> {MATERIAL_STAGE_LABEL[prevMaterialStage(from)!]}
+            </button>
+          ))}
+        </div>
+      );
+    })()}
   </div>
 );
 
@@ -587,6 +646,62 @@ const AdvanceModal: React.FC<{
         <div className="flex justify-end gap-2 pt-2">
           <button className="btn-ghost" onClick={onClose}>Cancel</button>
           <button className="btn-primary" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Confirm'}</button>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+// ---------------- Correction (step-back) modal ----------------
+const RegressModal: React.FC<{
+  p: MaterialProcurement;
+  from: MaterialStage;
+  actor: string;
+  onClose: () => void;
+  onSaved: () => void;
+}> = ({ p, from, actor, onClose, onSaved }) => {
+  const to = prevMaterialStage(from)!;
+  const available = procurementStageQty(p, from);
+  const [qty, setQty] = useState<number>(available);
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const save = async () => {
+    setError('');
+    if (qty <= 0 || qty > available) return setError(`Enter a quantity between 1 and ${available}.`);
+    setSaving(true);
+    try {
+      await regressProcurement(p.id, qty, from, {
+        note: note.trim() || undefined,
+        created_by_name: actor,
+      });
+      onSaved();
+    } catch (e: any) {
+      setError(e.message || 'Failed to correct.');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal title={`Correct — ${MATERIAL_STAGE_LABEL[from]} → ${MATERIAL_STAGE_LABEL[to]}`} onClose={onClose}>
+      <div className="space-y-4">
+        <div className="flex items-start gap-2 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <Undo2 size={15} className="shrink-0 mt-0.5" />
+          <span>Pull a quantity back if it was advanced by mistake. {p.material_name} has <span className="font-semibold">{available} {p.unit}</span> at {MATERIAL_STAGE_LABEL[from]}.</span>
+        </div>
+        <div>
+          <label className="label">Quantity to pull back</label>
+          <input className="input" type="number" min={1} max={available} value={qty || ''} onChange={(e) => setQty(Number(e.target.value))} />
+        </div>
+        <div>
+          <label className="label">Reason (optional)</label>
+          <input className="input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. marked received too early" />
+        </div>
+        {error && <div className="text-sm text-red-600 flex items-center gap-1"><AlertCircle size={14} /> {error}</div>}
+        <div className="flex justify-end gap-2 pt-2">
+          <button className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Pull back'}</button>
         </div>
       </div>
     </Modal>

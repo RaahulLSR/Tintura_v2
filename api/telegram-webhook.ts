@@ -8,6 +8,7 @@ import {
   MATERIAL_STAGE_ORDER,
   MATERIAL_STAGE_LABEL,
   prevMaterialStage,
+  nextMaterialStage,
   procurementStageQty,
   POSTER_KEY,
   CUSTOM_KEY,
@@ -15,7 +16,7 @@ import {
   getStylePoster,
   getStyleCustomItems,
 } from '../types.js';
-import type { Order, Style, Attachment, MaterialProcurement, StockCommitLine, SalesOrderLine, SalesOrder, ConsumptionType } from '../types.js';
+import type { Order, Style, Attachment, MaterialProcurement, StockCommitLine, SalesOrderLine, SalesOrder, ConsumptionType, OrderStockCommit } from '../types.js';
 import {
   fetchStyleByNumber,
   fetchOrders,
@@ -23,8 +24,11 @@ import {
   upsertStyle,
   fetchProcurements,
   advanceProcurement,
+  regressProcurement,
   createProcurement,
   commitOrderStock,
+  fetchOrderStockCommits,
+  undoOrderStockCommit,
   fetchStockLevels,
   createSalesOrder,
   forwardSalesOrder,
@@ -116,6 +120,7 @@ const MAIN_MENU = {
     [{ text: '📦 Order status & actions', callback_data: 'act:order' }],
     [{ text: '📋 Active orders', callback_data: 'act:orders' }],
     [{ text: '🧵 Order materials', callback_data: 'act:matorder' }],
+    [{ text: '📥 Materials to action', callback_data: 'act:matpend' }],
     [{ text: '🆕 New material request', callback_data: 'act:newmat' }],
     [{ text: '🧾 Raise PO (new sale)', callback_data: 'act:newpo' }],
     [{ text: '📄 Send a PO PDF', callback_data: 'act:popdf' }],
@@ -124,6 +129,7 @@ const MAIN_MENU = {
     [{ text: '📊 Daily summary', callback_data: 'act:daily' }],
     [{ text: '🎙️ Voice update (order / material)', callback_data: 'act:voice' }],
     [{ text: '🤖 Ask AI a question', callback_data: 'act:ai' }],
+    [{ text: '↩️ Undo last action', callback_data: 'undo:last' }],
   ],
 };
 
@@ -330,7 +336,8 @@ type Flow = {
     | 'po:line_style'
     | 'po:line_sizes'
     | 'po:line_rate'
-    | 'note:order';
+    | 'note:order'
+    | 'ai';
   pendingUpdate?: { orderId: string; orderNo: string; status: OrderStatus; current: OrderStatus };
   // A free-text floor note waiting for the order it belongs to.
   pendingNote?: string;
@@ -355,6 +362,12 @@ type Flow = {
     curSizes?: Record<string, number>;
     curQty?: number;
   };
+  // The most recent reversible action, so the user can tap "Undo" or send /undo.
+  lastAction?:
+    | { kind: 'material_advance'; procId: string; material: string; unit: string; fromStage: MaterialStage; toStage: MaterialStage; qty: number; at: string }
+    | { kind: 'material_regress'; procId: string; material: string; unit: string; fromStage: MaterialStage; toStage: MaterialStage; qty: number; at: string }
+    | { kind: 'stock_commit'; commitId: string; orderId: string; orderNo: string; total: number; at: string }
+    | { kind: 'order_status'; orderId: string; orderNo: string; prevStatus: OrderStatus; newStatus: OrderStatus; at: string };
 };
 
 const FLOW_TTL_MINUTES = 30;
@@ -392,6 +405,59 @@ const saveFlow = async (chatId: number | string, flow: Flow): Promise<void> => {
 };
 
 const clearFlow = (chatId: number | string) => saveFlow(chatId, {});
+
+// --- Undo / corrections -----------------------------------------------------
+// Every reversible action stamps a `lastAction` onto the flow. The user can then
+// tap "↩️ Undo" or send /undo to roll it back. This keeps the bot forgiving for
+// the materials desk, where a wrong tap should never be a dead end.
+
+/** Inline keyboard offering to undo the action that just happened. */
+const undoMarkup = () => ({
+  inline_keyboard: [
+    [{ text: '↩️ Undo that', callback_data: 'undo:last' }],
+    [{ text: '⬅️ Menu', callback_data: 'menu' }],
+  ],
+});
+
+/** Remember the last reversible action (also clears any in-progress flow). */
+const recordLastAction = (chatId: number | string, action: NonNullable<Flow['lastAction']>) =>
+  saveFlow(chatId, { lastAction: action });
+
+/** Reverse whatever the user last did, if it is still undoable. */
+const runUndoLast = async (token: string, chatId: number | string) => {
+  const flow = await loadFlow(chatId);
+  const a = flow.lastAction;
+  if (!a) return sendTelegram(token, chatId, 'Nothing to undo right now. Undo only works on your most recent action.', MAIN_MENU);
+  try {
+    if (a.kind === 'material_advance') {
+      await regressProcurement(a.procId, a.qty, a.toStage, { note: 'Undo via Telegram', created_by_name: 'Telegram' });
+      await clearFlow(chatId);
+      return sendTelegram(token, chatId, `↩️ Undone — ${a.qty} ${a.unit} pulled back ${MATERIAL_STAGE_LABEL[a.toStage]} → ${MATERIAL_STAGE_LABEL[a.fromStage]} for ${a.material}.`, MAIN_MENU);
+    }
+    if (a.kind === 'material_regress') {
+      await advanceProcurement(a.procId, a.qty, a.fromStage, { note: 'Undo via Telegram', created_by_name: 'Telegram' });
+      await clearFlow(chatId);
+      return sendTelegram(token, chatId, `↩️ Undone — ${a.qty} ${a.unit} moved forward ${MATERIAL_STAGE_LABEL[a.toStage]} → ${MATERIAL_STAGE_LABEL[a.fromStage]} again for ${a.material}.`, MAIN_MENU);
+    }
+    if (a.kind === 'stock_commit') {
+      const commits = await fetchOrderStockCommits(a.orderId);
+      const c = commits.find((x) => String(x.id) === String(a.commitId));
+      if (!c) return sendTelegram(token, chatId, 'That stock commit could not be found — it may already be undone.', MAIN_MENU);
+      if (c.undone) return sendTelegram(token, chatId, 'That stock commit was already undone.', MAIN_MENU);
+      await undoOrderStockCommit(c);
+      await clearFlow(chatId);
+      return sendTelegram(token, chatId, `↩️ Undone — ${a.total} piece(s) removed back out of inventory for ${a.orderNo}.`, MAIN_MENU);
+    }
+    if (a.kind === 'order_status') {
+      await updateOrderStatus(a.orderId, a.prevStatus, 'Reverted via Telegram');
+      await clearFlow(chatId);
+      return sendTelegram(token, chatId, `↩️ Undone — ${a.orderNo} set back to ${a.prevStatus}.`, MAIN_MENU);
+    }
+  } catch (e: any) {
+    return sendTelegram(token, chatId, `Could not undo: ${e.message}`, MAIN_MENU);
+  }
+  return sendTelegram(token, chatId, 'Nothing to undo right now.', MAIN_MENU);
+};
 
 // --- Deterministic data helpers (no AI) -------------------------------------
 
@@ -776,6 +842,14 @@ const procAdvanceMarkup = (p: MaterialProcurement) => {
       rows.push([{ text: `▶️ ${avail} → ${MATERIAL_STAGE_LABEL[to]}`, callback_data: `padv:${p.id}:${to}` }]);
     }
   }
+  // Correction buttons: pull a quantity back a stage if it was advanced by mistake.
+  for (const from of [MaterialStage.ORDERED, MaterialStage.RECEIVED, MaterialStage.RELEASED]) {
+    const here = procurementStageQty(p, from);
+    if (here > 0) {
+      const back = prevMaterialStage(from)!;
+      rows.push([{ text: `↩️ Fix: ${here} ${MATERIAL_STAGE_LABEL[from]} → ${MATERIAL_STAGE_LABEL[back]}`, callback_data: `pback:${p.id}:${from}` }]);
+    }
+  }
   rows.push([{ text: '⬅️ Menu', callback_data: 'menu' }]);
   return { inline_keyboard: rows };
 };
@@ -788,6 +862,38 @@ const sendProcurementCard = async (token: string, chatId: number | string, p: Ma
     `${procStageLine(p)}` +
     (p.invoice_no ? `\nInvoice: ${p.invoice_no}` : '');
   await sendTelegram(token, chatId, text, procAdvanceMarkup(p));
+};
+
+/** A one-tap list of every material line that still needs attention. The
+ *  materials desk never has to remember order numbers — just tap a line. */
+const runMaterialsToAction = async (token: string, chatId: number | string) => {
+  const all = await fetchProcurements().catch(() => [] as MaterialProcurement[]);
+  const needs = (p: MaterialProcurement) =>
+    procurementStageQty(p, MaterialStage.REQUESTED) > 0 ||
+    procurementStageQty(p, MaterialStage.ORDERED) > 0 ||
+    procurementStageQty(p, MaterialStage.RECEIVED) > 0;
+  const pending = all.filter(needs);
+  if (pending.length === 0) {
+    return sendTelegram(token, chatId, '🎉 All caught up — nothing waiting to be ordered, received or released.', MAIN_MENU);
+  }
+  const tag = (p: MaterialProcurement) => {
+    if (procurementStageQty(p, MaterialStage.REQUESTED) > 0) return '🟠 to order';
+    if (procurementStageQty(p, MaterialStage.ORDERED) > 0) return '🔵 awaiting receipt';
+    return '🟢 to release';
+  };
+  const rows = pending.slice(0, 20).map((p) => [
+    {
+      text: `${tag(p)} · ${p.material_name}${p.style_number ? ` (${p.style_number})` : ''}`.slice(0, 60),
+      callback_data: `psel:${p.id}`,
+    },
+  ]);
+  rows.push([{ text: '⬅️ Menu', callback_data: 'menu' }]);
+  await sendTelegram(
+    token,
+    chatId,
+    `📥 ${pending.length} material line(s) need attention.\nTap one to order, receive, release — or fix a mistake:`,
+    { inline_keyboard: rows }
+  );
 };
 
 /** Apply a procurement advance (full available qty at the previous stage). */
@@ -813,14 +919,57 @@ const doAdvanceProcurement = async (
       note: 'Updated via Telegram',
       created_by_name: 'Telegram',
     });
+    const fromStage = prevMaterialStage(toStage)!;
+    await recordLastAction(chatId, {
+      kind: 'material_advance', procId: updated.id, material: updated.material_name,
+      unit: updated.unit, fromStage, toStage, qty, at: new Date().toISOString(),
+    });
     await sendTelegram(
       token,
       chatId,
-      `✅ ${updated.material_name}: ${qty} ${updated.unit} → ${MATERIAL_STAGE_LABEL[toStage]}.`
+      `✅ ${updated.material_name}: ${qty} ${updated.unit} → ${MATERIAL_STAGE_LABEL[toStage]}.\nWrong tap? Tap Undo.`,
+      undoMarkup()
     );
     await sendProcurementCard(token, chatId, updated);
   } catch (e: any) {
     await sendTelegram(token, chatId, `Could not update: ${e.message}`, MAIN_MENU);
+  }
+};
+
+/** Apply a correction: pull the full quantity at a stage back to the previous one. */
+const doRegressProcurement = async (
+  token: string,
+  chatId: number | string,
+  procId: string,
+  fromStage: MaterialStage
+) => {
+  const all = await fetchProcurements();
+  const p = all.find((x) => x.id === procId);
+  if (!p) return sendTelegram(token, chatId, 'That material line no longer exists.', MAIN_MENU);
+  const back = prevMaterialStage(fromStage);
+  if (!back) return sendTelegram(token, chatId, `${MATERIAL_STAGE_LABEL[fromStage]} cannot be stepped back.`, MAIN_MENU);
+  const qty = procurementStageQty(p, fromStage);
+  if (qty <= 0) {
+    return sendTelegram(token, chatId, `Nothing is at the ${MATERIAL_STAGE_LABEL[fromStage]} stage to pull back.`, MAIN_MENU);
+  }
+  try {
+    const updated = await regressProcurement(p.id, qty, fromStage, {
+      note: 'Correction via Telegram',
+      created_by_name: 'Telegram',
+    });
+    await recordLastAction(chatId, {
+      kind: 'material_regress', procId: updated.id, material: updated.material_name,
+      unit: updated.unit, fromStage, toStage: back, qty, at: new Date().toISOString(),
+    });
+    await sendTelegram(
+      token,
+      chatId,
+      `↩️ Corrected: ${updated.material_name} ${qty} ${updated.unit} ${MATERIAL_STAGE_LABEL[fromStage]} → ${MATERIAL_STAGE_LABEL[back]}.`,
+      undoMarkup()
+    );
+    await sendProcurementCard(token, chatId, updated);
+  } catch (e: any) {
+    await sendTelegram(token, chatId, `Could not correct: ${e.message}`, MAIN_MENU);
   }
 };
 
@@ -1442,7 +1591,7 @@ const runDailySummary = async (token: string, chatId: number | string) => {
 
   // Fetch only what the role's sections need (parallel, best-effort).
   const [orders, procs, levels, sales] = await Promise.all([
-    wantsOrders ? fetchOrders() : Promise.resolve([] as Order[]),
+    (wantsOrders || wantsMaterials || wantsInventory) ? fetchOrders() : Promise.resolve([] as Order[]),
     wantsMaterials ? fetchProcurements() : Promise.resolve([] as MaterialProcurement[]),
     wantsInventory ? fetchStockLevels() : Promise.resolve([] as any[]),
     wantsSales ? fetchSalesOrders() : Promise.resolve([] as SalesOrder[]),
@@ -1475,7 +1624,25 @@ const runDailySummary = async (token: string, chatId: number | string) => {
       .map((s) => `  • ${MATERIAL_STAGE_LABEL[s]}: ${stageQty[s]}`)
       .join('\n') || '  • none pending';
     const awaiting = procs.filter((p) => procurementStageQty(p, MaterialStage.REQUESTED) > 0).length;
-    sections.push(`🧵 Materials pipeline (${procs.length} lines)\n${stageLines}\n  • Awaiting order: ${awaiting}`);
+    // Per-order: requested vs ordered vs received, so the materials desk knows
+    // exactly which orders need an action right now.
+    const orderMap = new Map<string, { req: number; ord: number; rec: number }>();
+    for (const p of procs) {
+      if (!p.order_id) continue;
+      const m = orderMap.get(p.order_id) || { req: 0, ord: 0, rec: 0 };
+      m.req += procurementStageQty(p, MaterialStage.REQUESTED);
+      m.ord += procurementStageQty(p, MaterialStage.ORDERED);
+      m.rec += procurementStageQty(p, MaterialStage.RECEIVED);
+      orderMap.set(p.order_id, m);
+    }
+    const attention = Array.from(orderMap.entries())
+      .map(([oid, m]) => ({ o: orders.find((x) => x.id === oid), ...m }))
+      .filter((x) => x.o && (x.req > 0 || x.rec > 0))
+      .sort((a, b) => (b.req + b.rec) - (a.req + a.rec))
+      .slice(0, 5)
+      .map((x) => `  • ${formatOrderNumber(x.o!)}: ${x.req} to order · ${x.ord} en route · ${x.rec} to release`);
+    const attentionBlock = attention.length ? `\n  Orders needing you:\n${attention.join('\n')}` : '';
+    sections.push(`🧵 Materials pipeline (${procs.length} lines)\n${stageLines}\n  • Awaiting order: ${awaiting}${attentionBlock}`);
   }
 
   if (wantsInventory) {
@@ -1484,8 +1651,12 @@ const runDailySummary = async (token: string, chatId: number | string) => {
     const outOf = levels.filter((l) => (Number(l.quantity) || 0) <= 0).length;
     const low = levels.filter((l) => { const q = Number(l.quantity) || 0; return q > 0 && q <= 20; }).length;
     const styleSet = new Set(levels.map((l) => l.style_number));
+    // In production = orders not yet completed/committed to stock.
+    const inProd = orders.filter((o) => o.status !== OrderStatus.COMPLETED);
+    const inProdUnits = inProd.reduce((a, o) => a + (Number(o.quantity) || 0), 0);
+    const inProdStyles = new Set(inProd.map((o) => o.style_number));
     sections.push(
-      `📦 Inventory on hand\n  • Total units: ${totalUnits.toLocaleString()}\n  • Styles in stock: ${styleSet.size}\n  • Active lines: ${lines.length}\n  • Low (≤20): ${low}\n  • Out of stock: ${outOf}`
+      `📦 Inventory\n  On hand:\n  • Total units: ${totalUnits.toLocaleString()}\n  • Styles in stock: ${styleSet.size}\n  • Active lines: ${lines.length}\n  • Low (≤20): ${low}\n  • Out of stock: ${outOf}\n  In production (not yet stocked):\n  • Orders open: ${inProd.length}\n  • Styles: ${inProdStyles.size}\n  • Units expected: ${inProdUnits.toLocaleString()}`
     );
   }
 
@@ -1500,7 +1671,8 @@ const runDailySummary = async (token: string, chatId: number | string) => {
     );
   }
 
-  const heading = `📊 Daily summary — ${today}\n(${role.replace(/_/g, ' ')})`;
+  const who = access.username ? access.username.split(/[ _.]/)[0] : '';
+  const heading = `📊 Daily summary — ${today}\n${who ? `Hi ${who} · ` : ''}(${role.replace(/_/g, ' ')})`;
   const body = sections.length ? sections.join('\n\n') : 'No summary is configured for your role yet.';
   await sendTelegram(token, chatId, `${heading}\n\n${body}`, MAIN_MENU);
 };
@@ -1672,6 +1844,9 @@ const handleCallback = async (token: string, chatId: number | string, data: stri
   } else if (data === 'act:matorder') {
     await saveFlow(chatId, { awaiting: 'matorder' });
     await sendTelegram(token, chatId, 'Send the order number to see its materials.');
+  } else if (data === 'act:matpend') {
+    await clearFlow(chatId);
+    return runMaterialsToAction(token, chatId);
   } else if (data === 'act:voice') {
     await clearFlow(chatId);
     await sendTelegram(
@@ -1771,13 +1946,19 @@ const handleCallback = async (token: string, chatId: number | string, data: stri
       return sendTelegram(token, chatId, `${formatOrderNumber(order)} has no completed pieces to commit.`, MAIN_MENU);
     }
     try {
-      await commitOrderStock(order, lines, 'Telegram');
+      const commit = await commitOrderStock(order, lines, 'Telegram');
       const total = lines.reduce((a, l) => a + l.qty, 0);
+      if (commit) {
+        await recordLastAction(chatId, {
+          kind: 'stock_commit', commitId: String(commit.id), orderId: order.id,
+          orderNo: formatOrderNumber(order), total, at: new Date().toISOString(),
+        });
+      }
       return sendTelegram(
         token,
         chatId,
-        `✅ Pushed ${total} piece(s) from ${formatOrderNumber(order)} into inventory across ${lines.length} colour/size line(s).`,
-        MAIN_MENU
+        `✅ Pushed ${total} piece(s) from ${formatOrderNumber(order)} into inventory across ${lines.length} colour/size line(s).\nWrong order? Tap Undo.`,
+        undoMarkup()
       );
     } catch (e: any) {
       return sendTelegram(token, chatId, `Could not commit stock: ${e.message}`, MAIN_MENU);
@@ -1823,6 +2004,13 @@ const handleCallback = async (token: string, chatId: number | string, data: stri
       return sendTelegram(token, chatId, 'Send the invoice number for this purchase (required to mark as Ordered).');
     }
     return doAdvanceProcurement(token, chatId, procId, toStage);
+  } else if (data.startsWith('pback:')) {
+    // Correct / step a procurement stage back. Format pback:<procId>:<STAGE>
+    const rest = data.slice('pback:'.length);
+    const idx = rest.lastIndexOf(':');
+    const procId = rest.slice(0, idx);
+    const fromStage = rest.slice(idx + 1) as MaterialStage;
+    return doRegressProcurement(token, chatId, procId, fromStage);
   } else if (data.startsWith('ofiles:')) {
     const order = (await fetchOrders()).find((o) => o.id === data.slice('ofiles:'.length));
     if (order) await runStyleFiles(token, chatId, order.style_number, false);
@@ -1842,18 +2030,27 @@ const handleCallback = async (token: string, chatId: number | string, data: stri
     if (!order) return sendTelegram(token, chatId, 'That order no longer exists.');
     const next = getNextOrderStatus(order.status);
     if (!next) return sendTelegram(token, chatId, `${formatOrderNumber(order)} is already at the final stage.`);
+    const prev = order.status;
     await updateOrderStatus(order.id, next, 'Updated via Telegram');
-    return sendTelegram(token, chatId, `✅ ${formatOrderNumber(order)} moved to ${next}.`);
+    await recordLastAction(chatId, {
+      kind: 'order_status', orderId: order.id, orderNo: formatOrderNumber(order),
+      prevStatus: prev, newStatus: next, at: new Date().toISOString(),
+    });
+    return sendTelegram(token, chatId, `✅ ${formatOrderNumber(order)} moved to ${next}.`, undoMarkup());
   } else if (data === 'upd:ok') {
     const flow = await loadFlow(chatId);
     if (!flow.pendingUpdate) return sendTelegram(token, chatId, 'Nothing to confirm.', MAIN_MENU);
-    const { orderId, orderNo, status } = flow.pendingUpdate;
+    const { orderId, orderNo, status, current } = flow.pendingUpdate;
     await updateOrderStatus(orderId, status, 'Updated via Telegram voice');
-    await clearFlow(chatId);
-    return sendTelegram(token, chatId, `✅ ${orderNo} set to ${status}.`);
+    await recordLastAction(chatId, {
+      kind: 'order_status', orderId, orderNo, prevStatus: current, newStatus: status, at: new Date().toISOString(),
+    });
+    return sendTelegram(token, chatId, `✅ ${orderNo} set to ${status}.`, undoMarkup());
   } else if (data === 'upd:no') {
     await clearFlow(chatId);
     return sendTelegram(token, chatId, 'Cancelled.', MAIN_MENU);
+  } else if (data === 'undo:last') {
+    return runUndoLast(token, chatId);
   } else if (data === 'menu') {
     await clearFlow(chatId);
     return sendMenu(token, chatId);
@@ -2244,9 +2441,24 @@ export default async function handler(req: any, res: any) {
     const text = (msg?.text || msg?.caption || '').trim();
     if (!text) return res.status(200).json({ ok: true });
 
-    if (/^\/(start|menu|help)\b/i.test(text)) {
+    if (/^\/(start|menu)\b/i.test(text)) {
       await clearFlow(chatId);
       await sendMenu(token, chatId, 'Tintura bot. Tap what you need:');
+      return res.status(200).json({ ok: true });
+    }
+    if (/^\/help\b/i.test(text)) {
+      await sendTelegram(
+        token,
+        chatId,
+        '🤖 Tintura bot — quick guide\n\n' +
+          '• Tap a menu button, or just send an order number to act on it.\n' +
+          '• 📥 Materials to action — one tap shows every material waiting to be ordered, received or released. No need to remember order numbers.\n' +
+          '• Every material card has ▶️ forward and ↩️ Fix buttons, so a wrong tap is never a dead end.\n' +
+          '• Made a mistake? Tap ↩️ Undo or send /undo to reverse your last action.\n' +
+          '• 🎙️ Send a voice note to update an order or material hands-free.\n\n' +
+          'Other commands: /menu  /undo  /reset  /id',
+        MAIN_MENU
+      );
       return res.status(200).json({ ok: true });
     }
     if (/^\/(id|whoami|chatid|myid)\b/i.test(text)) {
@@ -2262,6 +2474,10 @@ export default async function handler(req: any, res: any) {
     if (/^\/(reset|new|clear|cancel)\b/i.test(text)) {
       await clearFlow(chatId);
       await sendTelegram(token, chatId, 'Cleared.', MAIN_MENU);
+      return res.status(200).json({ ok: true });
+    }
+    if (/^\/undo\b/i.test(text)) {
+      await runUndoLast(token, chatId);
       return res.status(200).json({ ok: true });
     }
 

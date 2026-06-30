@@ -5,7 +5,8 @@ import {
   Loader2, Sparkles, Layers, ChevronUp, ChevronDown, Bookmark, FolderOpen,
   Eraser, AlignLeft, AlignCenter, AlignRight, Italic, Star,
   Crop, FlipHorizontal, FlipVertical, SlidersHorizontal, Paintbrush, Check, RotateCcw,
-  Wand2, Aperture, Zap,
+  Wand2, Aperture, Zap, Maximize,
+  Undo2, Redo2, ZoomIn, ZoomOut, Maximize2, Lock, Unlock, Eye, EyeOff, Grid3x3, GripVertical,
 } from 'lucide-react';
 import { Style, Attachment, getStylePoster } from '../../types';
 import {
@@ -14,7 +15,7 @@ import {
 } from '../../services/db';
 import { STICKER_URL } from '../../services/brandAssets';
 import {
-  El, TextEl, BoxEl, ImageEl, PosterBase, STAGE_PRESETS, STYLE_TOKENS,
+  El, TextEl, BoxEl, ImageEl, PosterBase, STAGE_PRESETS, STYLE_TOKENS, FONT_OPTIONS, curvedCharLayout,
   newText, newBox, newImage, cloneEl, applyTokens, renderPoster, removeWhiteBackground,
   fileToDataUrl, dataUrlToFile, loadImage, imageFilter, cropImage,
   inpaint, autoEnhance, sharpen,
@@ -52,9 +53,13 @@ const Color: React.FC<{ label: string; value: string; onChange: (v: string) => v
   </label>
 );
 
+/* a free-form canvas size — width/height can be anything the user wants */
+const CUSTOM_PRESET = { id: 'custom', label: 'Custom', w: 1080, h: 1080 };
+
 export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterReady }) => {
   const poster = getStylePoster(style);
-  const [preset, setPreset] = useState(STAGE_PRESETS[0]);
+  const [preset, setPreset] = useState<typeof STAGE_PRESETS[number] | typeof CUSTOM_PRESET>(STAGE_PRESETS[0]);
+  const [customSize, setCustomSize] = useState<{ w: number; h: number }>({ w: 1080, h: 1080 });
   const [base, setBase] = useState<PosterBase | null>(null);
   const [elements, setElements] = useState<El[]>([]);
   const [selId, setSelId] = useState<string | null>(null);
@@ -63,6 +68,15 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
   const cloudRef = useRef(true);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  /* zoom / pan / grid / snap */
+  const [zoom, setZoom] = useState(1);
+  const [showGrid, setShowGrid] = useState(false);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const gridSize = 60;
+  const [guides, setGuides] = useState<{ v: number[]; h: number[] }>({ v: [], h: [] });
+  const [showLayers, setShowLayers] = useState(true);
+  const measureCanvas = useMemo(() => document.createElement('canvas').getContext('2d')!, []);
 
   /* image-editing tools */
   const [tool, setTool] = useState<'move' | 'erase' | 'crop'>('move');
@@ -75,18 +89,60 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
   const eraseMaskRef = useRef<HTMLCanvasElement | null>(null);
   const erasingRef = useRef(false);
   const [crop, setCrop] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [cropKind, setCropKind] = useState<'el' | 'base'>('el');
 
   const fileRef = useRef<HTMLInputElement>(null);
   const baseFileRef = useRef<HTMLInputElement>(null);
 
-  const stageW = preset.w;
-  const stageH = preset.h;
+  const stageW = preset.id === 'custom' ? customSize.w : preset.w;
+  const stageH = preset.id === 'custom' ? customSize.h : preset.h;
   const maxW = 480, maxH = 600;
-  const scale = Math.min(maxW / stageW, maxH / stageH);
+  const baseScale = Math.min(maxW / stageW, maxH / stageH);
+  const scale = baseScale * zoom;
   const scaleRef = useRef(scale);
   scaleRef.current = scale;
 
   const sel = elements.find(e => e.id === selId) || null;
+
+  /* live refs + undo/redo history (captures the pre-edit state after a short idle) */
+  const elementsRef = useRef(elements); elementsRef.current = elements;
+  const baseRef = useRef(base); baseRef.current = base;
+  type Snap = { elements: El[]; base: PosterBase | null };
+  const undoStack = useRef<Snap[]>([]);
+  const redoStack = useRef<Snap[]>([]);
+  const applyingHistory = useRef(false);
+  const lastSnapRef = useRef<Snap>({ elements, base });
+  const commitTimer = useRef<any>(null);
+  const [, setHistVer] = useState(0);
+  useEffect(() => {
+    if (applyingHistory.current) { applyingHistory.current = false; lastSnapRef.current = { elements, base }; return; }
+    if (commitTimer.current) clearTimeout(commitTimer.current);
+    const pre = lastSnapRef.current;
+    commitTimer.current = setTimeout(() => {
+      undoStack.current.push(pre);
+      if (undoStack.current.length > 80) undoStack.current.shift();
+      redoStack.current = [];
+      lastSnapRef.current = { elements: elementsRef.current, base: baseRef.current };
+      commitTimer.current = null;
+      setHistVer(v => v + 1);
+    }, 300);
+  }, [elements, base]);
+  const undo = () => {
+    let target: Snap;
+    if (commitTimer.current) { clearTimeout(commitTimer.current); commitTimer.current = null; target = lastSnapRef.current; }
+    else { if (!undoStack.current.length) return; target = undoStack.current.pop()!; }
+    redoStack.current.push({ elements: elementsRef.current, base: baseRef.current });
+    applyingHistory.current = true;
+    setElements(target.elements); setBase(target.base); setSelId(null); setHistVer(v => v + 1);
+  };
+  const redo = () => {
+    if (commitTimer.current) { clearTimeout(commitTimer.current); commitTimer.current = null; undoStack.current.push(lastSnapRef.current); }
+    if (!redoStack.current.length) return;
+    const next = redoStack.current.pop()!;
+    undoStack.current.push({ elements: elementsRef.current, base: baseRef.current });
+    applyingHistory.current = true;
+    setElements(next.elements); setBase(next.base); setSelId(null); setHistVer(v => v + 1);
+  };
 
   const patch = (id: string, p: Partial<El>) =>
     setElements(els => els.map(e => (e.id === id ? ({ ...e, ...p } as El) : e)));
@@ -108,13 +164,76 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
     });
   };
 
+  /* ---------- layers ---------- */
+  const moveLayer = (id: string, toIndex: number) => {
+    setElements(els => {
+      const i = els.findIndex(e => e.id === id); if (i < 0) return els;
+      const arr = [...els]; const [it] = arr.splice(i, 1);
+      arr.splice(Math.max(0, Math.min(arr.length, toIndex)), 0, it); return arr;
+    });
+  };
+  const toggleLock = (id: string) => setElements(els => els.map(e => e.id === id ? ({ ...e, locked: !e.locked } as El) : e));
+  const toggleHidden = (id: string) => setElements(els => els.map(e => e.id === id ? ({ ...e, hidden: !e.hidden } as El) : e));
+  const renameLayer = (id: string, name: string) => setElements(els => els.map(e => e.id === id ? ({ ...e, name } as El) : e));
+  const layerLabel = (el: El) => el.name
+    || (el.type === 'text' ? (applyTokens((el as TextEl).text, style).replace(/\s+/g, ' ').trim().slice(0, 18) || 'Text')
+      : el.type === 'image' ? 'Image' : 'Box');
+
+  /* ---------- align (to canvas) & distribute (all elements) ---------- */
+  const alignSel = (where: 'l' | 'c' | 'r' | 't' | 'm' | 'b') => {
+    if (!sel) return;
+    if (where === 'l') patchSel({ x: 0 });
+    else if (where === 'c') patchSel({ x: Math.round(stageW / 2 - sel.w / 2) });
+    else if (where === 'r') patchSel({ x: Math.round(stageW - sel.w) });
+    else if (where === 't') patchSel({ y: 0 });
+    else if (where === 'm') patchSel({ y: Math.round(stageH / 2 - sel.h / 2) });
+    else if (where === 'b') patchSel({ y: Math.round(stageH - sel.h) });
+  };
+  const distribute = (axis: 'h' | 'v') => {
+    setElements(els => {
+      if (els.length < 3) return els;
+      const c = (e: El) => axis === 'h' ? e.x + e.w / 2 : e.y + e.h / 2;
+      const sorted = [...els].sort((a, b) => c(a) - c(b));
+      const first = c(sorted[0]), last = c(sorted[sorted.length - 1]);
+      const step = (last - first) / (sorted.length - 1);
+      const upd = new Map<string, Partial<El>>();
+      sorted.forEach((e, i) => {
+        if (i === 0 || i === sorted.length - 1) return;
+        const center = first + step * i;
+        upd.set(e.id, axis === 'h' ? { x: Math.round(center - e.w / 2) } : { y: Math.round(center - e.h / 2) });
+      });
+      return els.map(e => upd.has(e.id) ? ({ ...e, ...upd.get(e.id) } as El) : e);
+    });
+  };
+  const fitZoom = () => setZoom(1);
+
   /* drag / resize */
   const drag = useRef<any>(null);
   const onMove = (e: PointerEvent) => {
     const d = drag.current; if (!d) return;
     const dx = (e.clientX - d.sx) / scaleRef.current;
     const dy = (e.clientY - d.sy) / scaleRef.current;
-    if (d.mode === 'move') patch(d.id, { x: Math.round(d.o.x + dx), y: Math.round(d.o.y + dy) });
+    if (d.mode === 'move') {
+      let nx = d.o.x + dx, ny = d.o.y + dy;
+      const w = d.o.w, h = d.o.h;
+      const vg: number[] = [], hg: number[] = [];
+      if (snapEnabled) {
+        const SNAP = 7 / scaleRef.current;
+        const vT = [0, stageW / 2, stageW];
+        const hT = [0, stageH / 2, stageH];
+        for (const o of elementsRef.current) { if (o.id === d.id || o.hidden) continue; vT.push(o.x, o.x + o.w / 2, o.x + o.w); hT.push(o.y, o.y + o.h / 2, o.y + o.h); }
+        let bestX: { t: number; diff: number; adj: number } | null = null;
+        for (const t of vT) for (const a of [nx, nx + w / 2, nx + w]) { const diff = Math.abs(a - t); if (diff <= SNAP && (!bestX || diff < bestX.diff)) bestX = { t, diff, adj: t - a }; }
+        if (bestX) { nx += bestX.adj; vg.push(bestX.t); }
+        let bestY: { t: number; diff: number; adj: number } | null = null;
+        for (const t of hT) for (const a of [ny, ny + h / 2, ny + h]) { const diff = Math.abs(a - t); if (diff <= SNAP && (!bestY || diff < bestY.diff)) bestY = { t, diff, adj: t - a }; }
+        if (bestY) { ny += bestY.adj; hg.push(bestY.t); }
+        if (showGrid && !bestX) { const g = Math.round(nx / gridSize) * gridSize; if (Math.abs(g - nx) <= SNAP) nx = g; }
+        if (showGrid && !bestY) { const g = Math.round(ny / gridSize) * gridSize; if (Math.abs(g - ny) <= SNAP) ny = g; }
+      }
+      setGuides({ v: vg, h: hg });
+      patch(d.id, { x: Math.round(nx), y: Math.round(ny) });
+    }
     else if (d.mode === 'resize') {
       const w = Math.max(24, Math.round(d.o.w + dx));
       if (d.type === 'text') patch(d.id, { w });
@@ -126,12 +245,14 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
   };
   const onUp = () => {
     drag.current = null;
+    setGuides({ v: [], h: [] });
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
   };
   const startDrag = (e: React.PointerEvent, el: El, mode: 'move' | 'resize') => {
     e.stopPropagation();
     if (tool !== 'move') return;
+    if (el.locked) return;
     setSelId(el.id);
     drag.current = { mode, id: el.id, type: el.type, sx: e.clientX, sy: e.clientY, o: { x: el.x, y: el.y, w: el.w, h: el.h } };
     window.addEventListener('pointermove', onMove);
@@ -139,13 +260,30 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
   };
   useEffect(() => () => onUp(), []);
 
-  /* base image */
+  /* base image — sizing the canvas to the picture so nothing is cropped/squashed */
+  const applyBaseSrc = async (src: string) => {
+    setBase({ src, fit: 'contain', bg: '#ffffff' });
+    try {
+      const img = await loadImage(src);
+      setCustomSize({ w: img.naturalWidth, h: img.naturalHeight });
+      setPreset(CUSTOM_PRESET);
+    } catch { /* keep the current canvas if the image can't be measured */ }
+  };
   const pickBaseFile = async (file?: File) => {
     if (!file) return;
     const src = await fileToDataUrl(file);
-    setBase({ src, fit: 'cover', bg: '#ffffff' });
+    await applyBaseSrc(src);
   };
-  const pickBaseExisting = (url: string) => setBase({ src: url, fit: 'cover', bg: '#ffffff' });
+  const pickBaseExisting = (url: string) => { applyBaseSrc(url); };
+  const fitCanvasToBase = async () => {
+    if (!base?.src) return;
+    try {
+      const img = await loadImage(base.src);
+      setCustomSize({ w: img.naturalWidth, h: img.naturalHeight });
+      setPreset(CUSTOM_PRESET);
+      setBase({ ...base, fit: 'contain' });
+    } catch { /* ignore */ }
+  };
 
   /* add image element */
   const addImageFile = async (file?: File) => {
@@ -319,7 +457,15 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
   const startCrop = () => {
     if (!sel || sel.type !== 'image') return;
     const im = sel as ImageEl;
+    setCropKind('el');
     setCrop({ x: im.w * 0.1, y: im.h * 0.1, w: im.w * 0.8, h: im.h * 0.8 });
+    setTool('crop');
+  };
+  const startCropBase = () => {
+    if (!base?.src) return;
+    setSelId(null);
+    setCropKind('base');
+    setCrop({ x: stageW * 0.08, y: stageH * 0.08, w: stageW * 0.84, h: stageH * 0.84 });
     setTool('crop');
   };
   const cropDrag = useRef<any>(null);
@@ -349,9 +495,30 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
       const newW = Math.max(24, Math.round(crop.w));
       const newH = Math.max(24, Math.round(newW * (res.h / res.w)));
       patch(im.id, { src: res.src, x: Math.round(im.x + crop.x), y: Math.round(im.y + crop.y), w: newW, h: newH } as Partial<ImageEl>);
-    } finally { setBusy(false); setCrop(null); setTool('move'); }
+    } finally { setBusy(false); setCrop(null); setTool('move'); setCropKind('el'); }
   };
-  const cancelCrop = () => { setCrop(null); setTool('move'); };
+  /* crop the base image — the canvas becomes the cropped region and overlays follow it */
+  const applyCropBase = async () => {
+    if (!base?.src || !crop) return;
+    setBusy(true);
+    try {
+      const img = await loadImage(base.src);
+      const s = base.fit === 'cover'
+        ? Math.max(stageW / img.naturalWidth, stageH / img.naturalHeight)
+        : Math.min(stageW / img.naturalWidth, stageH / img.naturalHeight);
+      const dw = img.naturalWidth * s, dh = img.naturalHeight * s;
+      const offX = stageW / 2 - dw / 2, offY = stageH / 2 - dh / 2;
+      const res = await cropImage(base.src, (crop.x - offX) / dw, (crop.y - offY) / dh, crop.w / dw, crop.h / dh);
+      const newW = Math.max(24, Math.round(crop.w));
+      const newH = Math.max(24, Math.round(crop.h));
+      const dx = crop.x, dy = crop.y;
+      setBase({ ...base, src: res.src, fit: 'cover' });
+      setCustomSize({ w: newW, h: newH });
+      setPreset(CUSTOM_PRESET);
+      setElements(els => els.map(e => ({ ...e, x: Math.round(e.x - dx), y: Math.round(e.y - dy) } as El)));
+    } finally { setBusy(false); setCrop(null); setTool('move'); setCropKind('el'); }
+  };
+  const cancelCrop = () => { setCrop(null); setTool('move'); setCropKind('el'); };
 
   /* library (Supabase, with localStorage fallback) */
   const refreshLib = async () => {
@@ -425,9 +592,21 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selId) { removeEl(selId); e.preventDefault(); }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd' && selId) { duplicate(selId); e.preventDefault(); }
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase() === 'z') { if (e.shiftKey) redo(); else undo(); e.preventDefault(); return; }
+      if (mod && e.key.toLowerCase() === 'y') { redo(); e.preventDefault(); return; }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selId) { removeEl(selId); e.preventDefault(); return; }
+      if (mod && e.key.toLowerCase() === 'd' && selId) { duplicate(selId); e.preventDefault(); return; }
+      if (selId && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+        const el = elementsRef.current.find(x => x.id === selId); if (!el || el.locked) return;
+        const step = e.shiftKey ? 10 : 1;
+        if (e.key === 'ArrowUp') patch(selId, { y: el.y - step });
+        if (e.key === 'ArrowDown') patch(selId, { y: el.y + step });
+        if (e.key === 'ArrowLeft') patch(selId, { x: el.x - step });
+        if (e.key === 'ArrowRight') patch(selId, { x: el.x + step });
+        e.preventDefault();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -438,6 +617,7 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
 
   /* render an element in the editing stage */
   const renderEl = (el: El) => {
+    if (el.hidden) return null;
     const selected = el.id === selId;
     const common: React.CSSProperties = {
       position: 'absolute',
@@ -447,29 +627,53 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
       transform: `rotate(${el.rotation}deg)`,
       transformOrigin: 'center',
       opacity: el.opacity,
-      cursor: 'move',
+      cursor: el.locked ? 'default' : 'move',
     };
     let inner: React.ReactNode = null;
     if (el.type === 'text') {
       const t = el as TextEl;
-      inner = (
-        <div style={{
-          width: '100%',
-          background: t.bg === 'none' ? 'transparent' : t.bg,
-          borderRadius: t.radius * scale,
-          padding: `${t.padY * scale}px ${t.padX * scale}px`,
-          color: t.color,
-          fontSize: t.fontSize * scale,
-          fontWeight: t.fontWeight,
-          fontStyle: t.italic ? 'italic' : 'normal',
-          textAlign: t.align,
-          lineHeight: t.lineHeight,
-          letterSpacing: t.letterSpacing * scale,
-          fontFamily: 'Inter, Arial, sans-serif',
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-word',
-        }}>{applyTokens(t.text, style)}</div>
-      );
+      const fam = t.fontFamily || 'Inter, Arial, sans-serif';
+      const textShadow = t.shadow ? `${(t.shadowX ?? 2) * scale}px ${(t.shadowY ?? 2) * scale}px ${(t.shadowBlur ?? 6) * scale}px ${t.shadowColor || 'rgba(0,0,0,0.5)'}` : undefined;
+      const webkitStroke = (t.strokeWidth && t.strokeWidth > 0) ? `${t.strokeWidth * scale}px ${t.strokeColor || '#ffffff'}` : undefined;
+      if (t.curve && Math.abs(t.curve) > 0.5) {
+        measureCanvas.font = `${t.italic ? 'italic ' : ''}${t.fontWeight} ${t.fontSize}px ${fam}`;
+        const measure = (ch: string) => measureCanvas.measureText(ch).width + (t.letterSpacing || 0);
+        const { placed, width, height } = curvedCharLayout(measure, applyTokens(t.text, style), t.fontSize, t.curve);
+        inner = (
+          <div style={{ position: 'relative', width: width * scale, height: height * scale }}>
+            {placed.map((p, i) => (
+              <span key={i} style={{
+                position: 'absolute', left: p.x * scale, top: p.y * scale,
+                transform: `translate(-50%, -50%) rotate(${p.angle * 180 / Math.PI}deg)`,
+                color: t.color, fontSize: t.fontSize * scale, fontWeight: t.fontWeight,
+                fontStyle: t.italic ? 'italic' : 'normal', fontFamily: fam, whiteSpace: 'pre',
+                textShadow, WebkitTextStroke: webkitStroke as any,
+              }}>{p.ch === ' ' ? '\u00a0' : p.ch}</span>
+            ))}
+          </div>
+        );
+      } else {
+        inner = (
+          <div style={{
+            width: '100%',
+            background: t.bg === 'none' ? 'transparent' : t.bg,
+            borderRadius: t.radius * scale,
+            padding: `${t.padY * scale}px ${t.padX * scale}px`,
+            color: t.color,
+            fontSize: t.fontSize * scale,
+            fontWeight: t.fontWeight,
+            fontStyle: t.italic ? 'italic' : 'normal',
+            textAlign: t.align,
+            lineHeight: t.lineHeight,
+            letterSpacing: t.letterSpacing * scale,
+            fontFamily: fam,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            textShadow,
+            WebkitTextStroke: webkitStroke as any,
+          }}>{applyTokens(t.text, style)}</div>
+        );
+      }
     } else if (el.type === 'box') {
       const b = el as BoxEl;
       inner = <div style={{
@@ -544,6 +748,17 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
     </Section>
   );
 
+  /* crop controls for the base image (elements have their own inline panel) */
+  const baseCropPanel = (
+    <Section title="Crop · base">
+      <p className="text-[10px] text-slate-400 font-medium">Drag the box to position, drag the corner to resize, then apply. The canvas becomes the cropped area.</p>
+      <div className="flex items-center gap-1.5">
+        <button onClick={applyCropBase} disabled={busy} className="flex-1 px-2 py-1.5 rounded-lg bg-indigo-600 text-white text-[10px] font-black hover:bg-indigo-700 disabled:opacity-40 flex items-center justify-center gap-1">{busy ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />} Apply crop</button>
+        <button onClick={cancelCrop} className="px-2 py-1.5 rounded-lg bg-slate-100 text-slate-500 text-[10px] font-black">Cancel</button>
+      </div>
+    </Section>
+  );
+
   return createPortal(
     <div className="fixed inset-0 z-[60] bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-3 animate-fade-in">
       <div className="bg-slate-100 w-full max-w-[1300px] h-[94vh] rounded-3xl shadow-2xl overflow-hidden flex flex-col">
@@ -567,9 +782,16 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
           {/* LEFT TOOLS */}
           <div className="overflow-y-auto p-3 space-y-3 border-r border-slate-200">
             <Section title="Canvas">
-              <select value={preset.id} onChange={e => setPreset(STAGE_PRESETS.find(p => p.id === e.target.value)!)} className="w-full px-2 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-700 outline-none">
+              <select value={preset.id} onChange={e => { const v = e.target.value; setPreset(v === 'custom' ? CUSTOM_PRESET : STAGE_PRESETS.find(p => p.id === v)!); }} className="w-full px-2 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-700 outline-none">
                 {STAGE_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label} ({p.w}×{p.h})</option>)}
+                <option value="custom">Custom / any size</option>
               </select>
+              {preset.id === 'custom' && (
+                <div className="flex items-end gap-1.5">
+                  <Num label="W (px)" value={customSize.w} min={32} onChange={v => setCustomSize(s => ({ ...s, w: Math.max(32, Math.round(v)) }))} />
+                  <Num label="H (px)" value={customSize.h} min={32} onChange={v => setCustomSize(s => ({ ...s, h: Math.max(32, Math.round(v)) }))} />
+                </div>
+              )}
               <div className="flex items-center gap-2">
                 <button onClick={() => baseFileRef.current?.click()} className="flex-1 px-2 py-1.5 rounded-lg bg-indigo-600 text-white text-[11px] font-black hover:bg-indigo-700 flex items-center justify-center gap-1"><Upload size={12} /> Base image</button>
                 <input ref={baseFileRef} type="file" accept="image/*" className="hidden" onChange={e => { pickBaseFile(e.target.files?.[0]); e.currentTarget.value = ''; }} />
@@ -584,6 +806,10 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
               {base && (
                 <div className="space-y-1.5 pt-1 border-t border-slate-100">
                   <p className="text-[9px] font-bold text-slate-400 uppercase tracking-wide">Edit base image</p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button onClick={fitCanvasToBase} disabled={busy} className="px-2 py-1.5 rounded-lg bg-slate-100 text-slate-600 text-[10px] font-black hover:bg-slate-200 disabled:opacity-40 flex items-center justify-center gap-1"><Maximize size={12} /> Fit canvas</button>
+                    <button onClick={startCropBase} disabled={busy} className="px-2 py-1.5 rounded-lg bg-indigo-50 text-indigo-700 text-[10px] font-black hover:bg-indigo-100 disabled:opacity-40 flex items-center justify-center gap-1"><Crop size={12} /> Crop</button>
+                  </div>
                   <button onClick={startEraseBase} disabled={busy} className="w-full px-2 py-1.5 rounded-lg bg-fuchsia-600 text-white text-[10px] font-black hover:bg-fuchsia-700 disabled:opacity-40 flex items-center justify-center gap-1"><Wand2 size={12} /> Magic erase / eraser</button>
                   <div className="grid grid-cols-2 gap-1.5">
                     <button onClick={() => enhanceImg('auto', 'base')} disabled={busy} className="px-2 py-1.5 rounded-lg bg-slate-100 text-slate-600 text-[10px] font-black hover:bg-slate-200 disabled:opacity-40 flex items-center justify-center gap-1"><Zap size={12} /> Auto</button>
@@ -647,17 +873,60 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
           </div>
 
           {/* CENTER STAGE */}
-          <div className="bg-slate-200/60 overflow-auto grid place-items-center p-6" onPointerDown={() => { if (tool === 'move') setSelId(null); }}>
-            <div
-              className="relative shadow-2xl"
-              style={{ width: dispW, height: dispH, background: base?.bg || '#ffffff' }}
-              onPointerDown={e => e.stopPropagation()}
+          <div className="flex flex-col min-h-0 bg-slate-200/60">
+            {/* toolbar */}
+            <div className="flex items-center flex-wrap gap-1.5 px-3 py-2 bg-white/70 border-b border-slate-200">
+              <div className="flex items-center gap-1">
+                <button onClick={undo} title="Undo (Ctrl+Z)" className="p-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200"><Undo2 size={15} /></button>
+                <button onClick={redo} title="Redo (Ctrl+Y)" className="p-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200"><Redo2 size={15} /></button>
+              </div>
+              <div className="w-px h-5 bg-slate-200 mx-1" />
+              <div className="flex items-center gap-1">
+                <button onClick={() => setZoom(z => Math.max(0.2, +(z - 0.1).toFixed(2)))} title="Zoom out" className="p-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200"><ZoomOut size={15} /></button>
+                <span className="text-[11px] font-black text-slate-500 w-10 text-center">{Math.round(zoom * 100)}%</span>
+                <button onClick={() => setZoom(z => Math.min(4, +(z + 0.1).toFixed(2)))} title="Zoom in" className="p-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200"><ZoomIn size={15} /></button>
+                <button onClick={fitZoom} title="Reset zoom (100%)" className="p-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200"><Maximize2 size={15} /></button>
+              </div>
+              <div className="w-px h-5 bg-slate-200 mx-1" />
+              <button onClick={() => setShowGrid(g => !g)} title="Toggle grid" className={`p-1.5 rounded-lg ${showGrid ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}><Grid3x3 size={15} /></button>
+              <button onClick={() => setSnapEnabled(s => !s)} title="Toggle snapping & guides" className={`px-2 py-1.5 rounded-lg text-[10px] font-black ${snapEnabled ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>Snap</button>
+              <div className="w-px h-5 bg-slate-200 mx-1" />
+              <div className="flex items-center gap-0.5" title="Align selected to canvas">
+                {(['l', 'c', 'r', 't', 'm', 'b'] as const).map(a => (
+                  <button key={a} onClick={() => alignSel(a)} disabled={!sel} className="w-6 h-6 rounded-md bg-slate-100 text-slate-600 hover:bg-slate-200 disabled:opacity-30 text-[10px] font-black uppercase">{a}</button>
+                ))}
+              </div>
+              <div className="w-px h-5 bg-slate-200 mx-1" />
+              <button onClick={() => distribute('h')} title="Distribute all elements horizontally" className="px-2 py-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 text-[10px] font-black">Dist H</button>
+              <button onClick={() => distribute('v')} title="Distribute all elements vertically" className="px-2 py-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 text-[10px] font-black">Dist V</button>
+              <button onClick={() => sel && duplicate(sel.id)} disabled={!sel} title="Duplicate (Ctrl+D)" className="ml-auto p-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 disabled:opacity-30"><Copy size={15} /></button>
+            </div>
+            <div className="flex-1 overflow-auto grid place-items-center p-6"
+              onPointerDown={() => { if (tool === 'move') setSelId(null); }}
+              onWheel={e => { if (e.ctrlKey) { e.preventDefault(); setZoom(z => Math.max(0.2, Math.min(4, +(z - Math.sign(e.deltaY) * 0.1).toFixed(2)))); } }}
             >
+              <div
+                className="relative shadow-2xl"
+                style={{ width: dispW, height: dispH, background: base?.bg || '#ffffff' }}
+                onPointerDown={e => e.stopPropagation()}
+              >
               {base?.src && (
                 <img src={base.src} alt="" draggable={false}
                   style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: base.fit, pointerEvents: 'none', visibility: tool === 'erase' && editKind === 'base' ? 'hidden' : undefined }} />
               )}
               {elements.map(renderEl)}
+
+              {/* grid overlay */}
+              {showGrid && (
+                <div className="absolute inset-0 pointer-events-none" style={{
+                  backgroundImage: 'linear-gradient(to right, rgba(99,102,241,0.16) 1px, transparent 1px), linear-gradient(to bottom, rgba(99,102,241,0.16) 1px, transparent 1px)',
+                  backgroundSize: `${gridSize * scale}px ${gridSize * scale}px`,
+                }} />
+              )}
+
+              {/* snap / alignment guides */}
+              {guides.v.map((x, i) => (<div key={'gv' + i} className="absolute top-0 bottom-0 pointer-events-none" style={{ left: x * scale, width: 1, background: '#ec4899', zIndex: 40 }} />))}
+              {guides.h.map((y, i) => (<div key={'gh' + i} className="absolute left-0 right-0 pointer-events-none" style={{ top: y * scale, height: 1, background: '#ec4899', zIndex: 40 }} />))}
 
               {/* eraser overlay */}
               {tool === 'erase' && (editKind === 'base' ? !!base : sel?.type === 'image') && (() => {
@@ -676,9 +945,9 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
               })()}
 
               {/* crop overlay */}
-              {tool === 'crop' && sel?.type === 'image' && crop && (
+              {tool === 'crop' && crop && (cropKind === 'base' ? !!base : sel?.type === 'image') && (
                 <div
-                  style={{ position: 'absolute', left: (sel.x + crop.x) * scale, top: (sel.y + crop.y) * scale, width: crop.w * scale, height: crop.h * scale, zIndex: 30, boxShadow: '0 0 0 9999px rgba(15,23,42,0.45)', cursor: 'move', touchAction: 'none' }}
+                  style={{ position: 'absolute', left: ((cropKind === 'base' ? 0 : (sel?.x ?? 0)) + crop.x) * scale, top: ((cropKind === 'base' ? 0 : (sel?.y ?? 0)) + crop.y) * scale, width: crop.w * scale, height: crop.h * scale, zIndex: 30, boxShadow: '0 0 0 9999px rgba(15,23,42,0.45)', cursor: 'move', touchAction: 'none' }}
                   onPointerDown={e => startCropDrag(e, 'move')}
                 >
                   <div className="absolute inset-0 border-2 border-white/90" />
@@ -686,12 +955,42 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
                 </div>
               )}
             </div>
+            </div>
           </div>
 
           {/* RIGHT PROPERTIES */}
           <div className="overflow-y-auto p-3 space-y-3 border-l border-slate-200">
+            {elements.length > 0 && (
+              <Section title={`Layers (${elements.length})`}>
+                <div className="space-y-1 max-h-52 overflow-y-auto -mx-1 px-1">
+                  {elements.map((_, i) => i).reverse().map(i => {
+                    const el = elements[i];
+                    const selected = el.id === selId;
+                    return (
+                      <div key={el.id}
+                        draggable
+                        onDragStart={e => e.dataTransfer.setData('layer-idx', String(i))}
+                        onDragOver={e => e.preventDefault()}
+                        onDrop={e => { e.preventDefault(); const from = Number(e.dataTransfer.getData('layer-idx')); if (!Number.isNaN(from)) moveLayer(elements[from].id, i); }}
+                        onClick={() => { setSelId(el.id); setTool('move'); }}
+                        className={`flex items-center gap-1 px-1.5 py-1 rounded-lg cursor-pointer ${selected ? 'bg-indigo-50 ring-1 ring-indigo-300' : 'hover:bg-slate-50'}`}
+                      >
+                        <GripVertical size={13} className="text-slate-300 shrink-0 cursor-grab" />
+                        <input value={el.name || ''} placeholder={layerLabel(el)} onClick={e => e.stopPropagation()}
+                          onChange={e => renameLayer(el.id, e.target.value)}
+                          className="flex-1 min-w-0 bg-transparent text-[11px] font-bold text-slate-600 outline-none truncate" />
+                        <button onClick={e => { e.stopPropagation(); toggleHidden(el.id); }} title={el.hidden ? 'Show' : 'Hide'} className="p-1 rounded text-slate-400 hover:text-slate-700">{el.hidden ? <EyeOff size={12} /> : <Eye size={12} />}</button>
+                        <button onClick={e => { e.stopPropagation(); toggleLock(el.id); }} title={el.locked ? 'Unlock' : 'Lock'} className="p-1 rounded text-slate-400 hover:text-slate-700">{el.locked ? <Lock size={12} /> : <Unlock size={12} />}</button>
+                        <button onClick={e => { e.stopPropagation(); removeEl(el.id); }} title="Delete" className="p-1 rounded text-red-400 hover:text-red-600"><Trash2 size={12} /></button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </Section>
+            )}
             {tool === 'erase' && editKind === 'base' && eraserPanel}
-            {!sel && !(tool === 'erase' && editKind === 'base') && <div className="text-center text-slate-400 text-xs font-semibold py-10">Select an element to edit it.<br />Drag to move · drag the corner to resize.</div>}
+            {tool === 'crop' && cropKind === 'base' && baseCropPanel}
+            {!sel && !(tool === 'erase' && editKind === 'base') && !(tool === 'crop' && cropKind === 'base') && <div className="text-center text-slate-400 text-xs font-semibold py-10">Select an element to edit it.<br />Drag to move · drag the corner to resize.</div>}
             {sel && (
               <>
                 <Section title="Layout">
@@ -758,6 +1057,48 @@ export const PosterEditorModal: React.FC<Props> = ({ style, onClose, onPosterRea
                       <div className="flex gap-1.5">
                         <Num label="Line" value={t.lineHeight} step={0.05} onChange={v => patchSel({ lineHeight: Math.max(0.8, v) } as Partial<TextEl>)} />
                         <Num label="Spacing" value={t.letterSpacing} onChange={v => patchSel({ letterSpacing: v } as Partial<TextEl>)} />
+                      </div>
+                      {/* font family */}
+                      <div className="space-y-1 pt-1.5 border-t border-slate-100">
+                        <p className="text-[9px] font-bold text-slate-400 uppercase tracking-wide">Font</p>
+                        <select value={t.fontFamily || FONT_OPTIONS[0].value} onChange={e => patchSel({ fontFamily: e.target.value } as Partial<TextEl>)}
+                          className="w-full px-2 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-700 outline-none focus:border-indigo-500">
+                          {FONT_OPTIONS.map(f => <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>{f.label}</option>)}
+                        </select>
+                      </div>
+                      {/* curve */}
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <p className="text-[9px] font-bold text-slate-400 uppercase tracking-wide">Curve</p>
+                          <span className="text-[10px] font-black text-slate-500">{Math.round(t.curve || 0)}°</span>
+                        </div>
+                        <input type="range" min={-180} max={180} step={1} value={t.curve || 0} onChange={e => patchSel({ curve: Number(e.target.value) } as Partial<TextEl>)} className="w-full accent-indigo-600" />
+                        {!!(t.curve && Math.abs(t.curve) > 0.5) && (
+                          <button onClick={() => patchSel({ curve: 0 } as Partial<TextEl>)} className="text-[9px] font-bold text-indigo-500 hover:underline">Reset curve</button>
+                        )}
+                      </div>
+                      {/* shadow */}
+                      <div className="space-y-1.5 pt-1.5 border-t border-slate-100">
+                        <button onClick={() => patchSel({ shadow: !t.shadow } as Partial<TextEl>)} className={`px-2 py-1 rounded-lg text-[10px] font-black ${t.shadow ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'}`}>{t.shadow ? 'Shadow on' : 'Shadow off'}</button>
+                        {t.shadow && (
+                          <>
+                            <div className="flex items-center gap-2">
+                              <Color label="Color" value={t.shadowColor || '#000000'} onChange={v => patchSel({ shadowColor: v } as Partial<TextEl>)} />
+                              <Num label="Blur" value={t.shadowBlur ?? 6} onChange={v => patchSel({ shadowBlur: Math.max(0, v) } as Partial<TextEl>)} />
+                            </div>
+                            <div className="flex gap-1.5">
+                              <Num label="Offset X" value={t.shadowX ?? 2} onChange={v => patchSel({ shadowX: v } as Partial<TextEl>)} />
+                              <Num label="Offset Y" value={t.shadowY ?? 2} onChange={v => patchSel({ shadowY: v } as Partial<TextEl>)} />
+                            </div>
+                          </>
+                        )}
+                      </div>
+                      {/* outline */}
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-2">
+                          <Num label="Outline" value={t.strokeWidth ?? 0} step={0.5} onChange={v => patchSel({ strokeWidth: Math.max(0, v) } as Partial<TextEl>)} />
+                          {!!(t.strokeWidth && t.strokeWidth > 0) && <Color label="Color" value={t.strokeColor || '#ffffff'} onChange={v => patchSel({ strokeColor: v } as Partial<TextEl>)} />}
+                        </div>
                       </div>
                     </Section>
                   );

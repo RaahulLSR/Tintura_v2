@@ -160,12 +160,16 @@ create table if not exists orders (
   size_sequence        jsonb default '[]'::jsonb,
   description          text default '',
   qc_notes             text,
+  ai_issue_summary     text,
+  ai_issue_summary_generated_at timestamptz,
   target_delivery_date date,
   size_format          text default 'standard',       -- 'standard' | 'numeric'
   status               text not null default 'ASSIGNED',
   deleted              boolean not null default false,
   created_at           timestamptz not null default now()
 );
+alter table orders add column if not exists ai_issue_summary text;
+alter table orders add column if not exists ai_issue_summary_generated_at timestamptz;
 create index if not exists idx_orders_status  on orders (status);
 create index if not exists idx_orders_deleted on orders (deleted);
 create index if not exists idx_orders_created on orders (created_at desc);
