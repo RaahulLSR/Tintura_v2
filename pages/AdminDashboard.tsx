@@ -1,7 +1,7 @@
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { fetchOrders, fetchUnits, triggerOrderEmail, fetchOrderLogs, addOrderLog, recordOrderEditHistory, supabase } from '../services/db';
-import { Order, Unit, OrderStatus, formatOrderNumber, OrderLog } from '../types';
+import { Order, Unit, OrderStatus, formatOrderNumber, OrderLog, OrderSortKey, sortOrders } from '../types';
 import { BarChart3, PieChart, PlusCircle, ClipboardList, Printer, Loader2, CheckSquare, Square, History, Factory, Calendar, RefreshCcw, X, CheckCircle2 } from 'lucide-react';
 import { DashboardStats } from '../components/admin/DashboardStats';
 import { MasterOrderList } from '../components/admin/MasterOrderList';
@@ -18,6 +18,7 @@ export const AdminDashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'overview' | 'completed' | 'reports'>('overview');
   const [orders, setOrders] = useState<Order[]>([]);
   const [units, setUnits] = useState<Unit[]>([]);
+  const [selectedUnitId, setSelectedUnitId] = useState<number | 'all'>(2);
   const [liveStockCount, setLiveStockCount] = useState(0);
   const [activeOrderCount, setActiveOrderCount] = useState(0);
   const [emailLoading, setEmailLoading] = useState<string | null>(null);
@@ -42,11 +43,26 @@ export const AdminDashboard: React.FC = () => {
     ]);
     setOrders(fetchedOrders);
     setUnits(fetchedUnits);
+    const defaultUnit = fetchedUnits.find(u => u.id === 2 || /unit a/i.test(u.name));
+    setSelectedUnitId(prev => {
+      if (prev !== 'all' && fetchedUnits.some(u => u.id === prev)) return prev;
+      return defaultUnit?.id ?? fetchedUnits[0]?.id ?? 'all';
+    });
     setLiveStockCount(0);
     setActiveOrderCount(fetchedOrders.filter(o => o.status !== OrderStatus.COMPLETED).length);
   };
 
   useEffect(() => { loadData(); }, [activeTab]);
+
+  const visibleOrders = useMemo(() => {
+    const byUnit = selectedUnitId === 'all' ? orders : orders.filter(o => o.unit_id === selectedUnitId);
+    return byUnit.filter(o => o.status !== OrderStatus.COMPLETED);
+  }, [orders, selectedUnitId]);
+
+  const visibleCompletedOrders = useMemo(() => {
+    const byUnit = selectedUnitId === 'all' ? orders : orders.filter(o => o.unit_id === selectedUnitId);
+    return byUnit.filter(o => o.status === OrderStatus.COMPLETED);
+  }, [orders, selectedUnitId]);
 
   const handleSendEmail = async (orderId: string) => {
     setEmailLoading(orderId);
@@ -185,7 +201,18 @@ export const AdminDashboard: React.FC = () => {
             {activeTab === 'overview' ? 'Executive Dashboard' : activeTab === 'completed' ? 'Completed Orders' : 'Analytics & Reports'}
           </h2>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
+            <div className="bg-white border border-slate-200 rounded-xl shadow-sm px-3 py-2">
+              <label className="text-[11px] font-black uppercase tracking-widest text-slate-400 mr-2">Unit</label>
+              <select
+                value={selectedUnitId}
+                onChange={(e) => setSelectedUnitId(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+                className="bg-transparent text-sm font-semibold text-slate-700 outline-none"
+              >
+                <option value="all">All units</option>
+                {units.map(unit => <option key={unit.id} value={unit.id}>{unit.name}</option>)}
+              </select>
+            </div>
             <div className="bg-white p-1 rounded-xl border border-slate-200 shadow-sm flex gap-1">
                 <button onClick={() => setActiveTab('overview')} className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-bold transition-all ${activeTab === 'overview' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}><BarChart3 size={18}/> Overview</button>
                 <button onClick={() => setActiveTab('completed')} className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-bold transition-all ${activeTab === 'completed' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}><CheckCircle2 size={18}/> Completed</button>
@@ -206,7 +233,7 @@ export const AdminDashboard: React.FC = () => {
         <div className="space-y-6 animate-fade-in">
             <DashboardStats liveStockCount={liveStockCount} activeOrderCount={activeOrderCount} />
             <MasterOrderList 
-              orders={orders.filter(o => o.status !== OrderStatus.COMPLETED)} 
+              orders={visibleOrders} 
               units={units} 
               onRefresh={loadData} 
               onViewDetails={setDetailsModal} 
@@ -223,7 +250,7 @@ export const AdminDashboard: React.FC = () => {
       ) : activeTab === 'completed' ? (
         <div className="space-y-6 animate-fade-in">
             <MasterOrderList 
-              orders={orders.filter(o => o.status === OrderStatus.COMPLETED)} 
+              orders={visibleCompletedOrders} 
               units={units} 
               onRefresh={loadData} 
               onViewDetails={setDetailsModal} 

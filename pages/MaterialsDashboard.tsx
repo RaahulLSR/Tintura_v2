@@ -20,11 +20,12 @@ import {
   OrderStatus,
   OrderStockCommit,
   formatOrderNumber,
+  OrderSortKey,
 } from '../types';
 import { useAuth } from '../components/Layout';
 import {
   Package, Plus, RefreshCcw, Search, X, Clock, FileText, ArrowRight, Mic, AlertCircle,
-  ChevronRight, ArrowLeft, CheckCircle2, Layers, PackageCheck, Undo2,
+  ChevronRight, ArrowLeft, CheckCircle2, Layers, PackageCheck, Undo2, ArrowUpDown,
 } from 'lucide-react';
 
 const STAGE_COLOR: Record<MaterialStage, string> = {
@@ -64,6 +65,7 @@ export const MaterialsDashboard: React.FC = () => {
   const [commits, setCommits] = useState<OrderStockCommit[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [sortBy, setSortBy] = useState<OrderSortKey>('issue');
   const [selectedOrderKey, setSelectedOrderKey] = useState<string | null>(null);
 
   const [showCreate, setShowCreate] = useState(false);
@@ -134,8 +136,32 @@ export const MaterialsDashboard: React.FC = () => {
     );
   }, [groups, search]);
 
-  const activeGroups = filteredGroups.filter((g) => !g.completed);
-  const completedGroups = filteredGroups.filter((g) => g.completed);
+  const sortedGroups = useMemo(() => {
+    const sorted = [...filteredGroups];
+    sorted.sort((a, b) => {
+      const orderA = a.order;
+      const orderB = b.order;
+      switch (sortBy) {
+        case 'due':
+          return (orderA?.target_delivery_date || '9999').localeCompare(orderB?.target_delivery_date || '9999');
+        case 'qty':
+          return b.totalQty - a.totalQty;
+        case 'status':
+          return String(a.completed ? 'completed' : 'active').localeCompare(String(b.completed ? 'completed' : 'active'));
+        case 'orderno':
+          return (orderA ? formatOrderNumber(orderA) : groupLabel(a)).localeCompare(orderB ? formatOrderNumber(orderB) : groupLabel(b), undefined, { numeric: true });
+        case 'style':
+          return String(orderA?.style_number || '').localeCompare(String(orderB?.style_number || ''));
+        case 'issue':
+        default:
+          return new Date(orderB?.created_at || 0).getTime() - new Date(orderA?.created_at || 0).getTime();
+      }
+    });
+    return sorted;
+  }, [filteredGroups, sortBy]);
+
+  const activeGroups = sortedGroups.filter((g) => !g.completed);
+  const completedGroups = sortedGroups.filter((g) => g.completed);
   const selectedGroup = selectedOrderKey ? groups.find((g) => g.key === selectedOrderKey) || null : null;
 
   const orderLabel = (orderId: string | null) => {
@@ -186,6 +212,25 @@ export const MaterialsDashboard: React.FC = () => {
               <span className="text-[10px] font-bold text-sky-600 uppercase">To release</span>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-end">
+        <div className="relative">
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as OrderSortKey)}
+            className="appearance-none pl-10 pr-8 py-2.5 border border-slate-200 rounded-xl text-sm bg-white text-slate-700 font-semibold outline-none"
+            title="Sort materials groups"
+          >
+            <option value="issue">Issue date</option>
+            <option value="due">Due date</option>
+            <option value="qty">Volume</option>
+            <option value="status">Status</option>
+            <option value="orderno">Order number</option>
+            <option value="style">Style number</option>
+          </select>
+          <ArrowUpDown className="absolute left-3 top-3 text-slate-400 pointer-events-none" size={18} />
         </div>
       </div>
 

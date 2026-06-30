@@ -1,8 +1,8 @@
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { fetchOrders, updateOrderStatus, uploadOrderAttachment } from '../services/db';
-import { Order, OrderStatus, formatOrderNumber } from '../types';
-import { CheckCheck, ClipboardList, ThumbsUp, ThumbsDown, Upload, FileText } from 'lucide-react';
+import { Order, OrderStatus, formatOrderNumber, OrderSortKey, sortOrders } from '../types';
+import { CheckCheck, ClipboardList, ThumbsUp, ThumbsDown, Upload, FileText, ArrowUpDown } from 'lucide-react';
 
 interface OrderQCModal {
     id: string;
@@ -13,6 +13,7 @@ interface OrderQCModal {
 export const QCDashboard: React.FC = () => {
   // Order State
   const [qcOrders, setQcOrders] = useState<Order[]>([]);
+  const [sortBy, setSortBy] = useState<OrderSortKey>('issue');
   const [orderModal, setOrderModal] = useState<OrderQCModal | null>(null);
   const [qcDescription, setQcDescription] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -25,6 +26,8 @@ export const QCDashboard: React.FC = () => {
   };
 
   useEffect(() => { loadData(); }, []);
+
+  const sortedQcOrders = useMemo(() => sortOrders(qcOrders, sortBy), [qcOrders, sortBy]);
 
   // --- ORDER LOGIC ---
   const handleOrderAction = async (e: React.FormEvent) => {
@@ -75,14 +78,29 @@ export const QCDashboard: React.FC = () => {
 
       {/* --- ORDERS VIEW --- */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200">
-            <div className="p-4 border-b bg-indigo-50 font-semibold text-indigo-800 flex items-center gap-2">
-            <CheckCheck size={18} /> Orders Pending Final Review
+            <div className="p-4 border-b bg-indigo-50 font-semibold text-indigo-800 flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2"><CheckCheck size={18} /> Orders Pending Final Review</div>
+              <div className="relative">
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as OrderSortKey)}
+                  className="appearance-none pl-10 pr-8 py-2 border border-indigo-200 rounded-lg text-sm bg-white text-slate-700 font-semibold outline-none"
+                  title="Sort QC orders"
+                >
+                  <option value="issue">Issue date</option>
+                  <option value="due">Due date</option>
+                  <option value="qty">Volume</option>
+                  <option value="orderno">Order number</option>
+                  <option value="style">Style number</option>
+                </select>
+                <ArrowUpDown className="absolute left-3 top-2.5 text-slate-400 pointer-events-none" size={16} />
+              </div>
             </div>
-            {qcOrders.length === 0 ? (
+            {sortedQcOrders.length === 0 ? (
                 <div className="p-10 text-center text-slate-400">All caught up! No orders pending QC.</div>
             ) : (
             <div className="grid grid-cols-1 divide-y divide-slate-100">
-                {qcOrders.map(order => {
+                {sortedQcOrders.map(order => {
                     const formattedNo = formatOrderNumber(order);
                     return (
                         <div key={order.id} className="p-6 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-slate-50 transition">

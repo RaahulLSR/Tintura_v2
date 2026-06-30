@@ -1,9 +1,9 @@
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { fetchOrders, updateOrderStatus, updateOrderCompletionBreakdown, fetchMaterialRequests, deleteMaterialRequest, triggerMaterialEmail, fetchOrderLogs, addOrderLog, fetchStyleByNumber, fetchStyleTemplate, fetchOrderStockCommits, commitOrderStock, undoOrderStockCommit, deliverCompletionReport } from '../services/db';
-import { Order, OrderStatus, getNextOrderStatus, SizeBreakdown, MaterialRequest, OrderLog, MaterialStatus, formatOrderNumber, Style, ConsumptionType, Attachment, OrderStockCommit, StockCommitLine, getSizeKeyFromLabel } from '../types';
+import { Order, OrderStatus, getNextOrderStatus, SizeBreakdown, MaterialRequest, OrderLog, MaterialStatus, formatOrderNumber, Style, ConsumptionType, Attachment, OrderStockCommit, StockCommitLine, getSizeKeyFromLabel, OrderSortKey, sortOrders } from '../types';
 import { StatusBadge, BulkActionToolbar } from '../components/Widgets';
-import { ArrowRight, Printer, PackagePlus, Box, AlertTriangle, Eye, CheckCircle2, History, ListTodo, Archive, Clock, Search, Mail, Loader2, Info, Boxes } from 'lucide-react';
+import { ArrowRight, Printer, PackagePlus, Box, AlertTriangle, Eye, CheckCircle2, History, ListTodo, Archive, Clock, Search, Mail, Loader2, Info, Boxes, ArrowUpDown } from 'lucide-react';
 import { brandHeaderDualLogoHtml } from '../services/brandAssets';
 
 import { OrderDetailsModal } from '../components/subunit/OrderDetailsModal';
@@ -38,6 +38,7 @@ export const SubunitDashboard: React.FC = () => {
   const [selectedOrders, setSelectedOrders] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const [sortBy, setSortBy] = useState<OrderSortKey>('issue');
   const [emailLoading, setEmailLoading] = useState<string | null>(null);
   
   const [detailsModal, setDetailsModal] = useState<Order | null>(null);
@@ -64,12 +65,15 @@ export const SubunitDashboard: React.FC = () => {
 
   useEffect(() => { refreshOrders(); }, []);
 
-  const displayedOrders = orders.filter(o => {
-      const formattedNo = formatOrderNumber(o);
-      const matchesTab = activeTab === 'active' ? o.status !== OrderStatus.COMPLETED : o.status === OrderStatus.COMPLETED;
-      const matchesSearch = formattedNo.toLowerCase().includes(searchTerm.toLowerCase()) || o.style_number.toLowerCase().includes(searchTerm.toLowerCase());
-      return matchesTab && matchesSearch;
-  });
+  const displayedOrders = useMemo(() => {
+      const filtered = orders.filter(o => {
+        const formattedNo = formatOrderNumber(o);
+        const matchesTab = activeTab === 'active' ? o.status !== OrderStatus.COMPLETED : o.status === OrderStatus.COMPLETED;
+        const matchesSearch = formattedNo.toLowerCase().includes(searchTerm.toLowerCase()) || o.style_number.toLowerCase().includes(searchTerm.toLowerCase());
+        return matchesTab && matchesSearch;
+      });
+      return sortOrders(filtered, sortBy);
+  }, [orders, activeTab, searchTerm, sortBy]);
 
   const toggleSelect = (id: string) => {
     setSelectedOrders(prev => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]);

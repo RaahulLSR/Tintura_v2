@@ -1,17 +1,16 @@
 
 import React, { useMemo, useState } from 'react';
 import { Search, RefreshCw, Eye, Send, Loader2, Square, CheckSquare, ArrowUpDown, Clock, FileText } from 'lucide-react';
-import { Order, Unit, formatOrderNumber, OrderStatus } from '../../types';
+import { Order, Unit, formatOrderNumber, OrderStatus, OrderSortKey, sortOrders } from '../../types';
 import { StatusBadge } from '../Widgets';
 
-type SortKey = 'recent' | 'due' | 'qty' | 'status' | 'orderno';
-
-const SORT_OPTIONS: { key: SortKey; label: string }[] = [
-  { key: 'recent', label: 'Newest first' },
+const SORT_OPTIONS: { key: OrderSortKey; label: string }[] = [
+  { key: 'issue', label: 'Issue date (newest)' },
   { key: 'due', label: 'Due date (soonest)' },
   { key: 'qty', label: 'Volume (high to low)' },
   { key: 'status', label: 'Status (A-Z)' },
   { key: 'orderno', label: 'Order number' },
+  { key: 'style', label: 'Style number' },
 ];
 
 interface MasterOrderListProps {
@@ -36,7 +35,7 @@ export const MasterOrderList: React.FC<MasterOrderListProps> = ({
   title = 'Master Production List', emptyMessage = 'No matching orders found.', showSort = true,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [sortBy, setSortBy] = useState<SortKey>('recent');
+  const [sortBy, setSortBy] = useState<OrderSortKey>('issue');
 
   const filteredOrders = useMemo(() => {
     const matches = orders.filter(order => {
@@ -75,7 +74,7 @@ export const MasterOrderList: React.FC<MasterOrderListProps> = ({
             <div className="relative">
               <select
                 value={sortBy}
-                onChange={(e) => setSortBy(e.target.value as SortKey)}
+                onChange={(e) => setSortBy(e.target.value as OrderSortKey)}
                 className="appearance-none pl-10 pr-8 py-2.5 border border-slate-300 rounded-xl text-sm bg-white text-slate-700 font-semibold focus:ring-2 focus:ring-indigo-500 outline-none cursor-pointer"
                 title="Sort orders"
               >

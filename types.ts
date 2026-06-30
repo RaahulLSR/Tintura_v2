@@ -37,6 +37,34 @@ export interface Unit {
   is_main: boolean;
 }
 
+export type OrderSortKey = 'issue' | 'due' | 'qty' | 'status' | 'orderno' | 'style';
+
+export const sortOrders = (orders: Order[], sortBy: OrderSortKey) => {
+  const sorted = [...orders];
+  switch (sortBy) {
+    case 'due':
+      sorted.sort((a, b) => (a.target_delivery_date || '9999').localeCompare(b.target_delivery_date || '9999'));
+      break;
+    case 'qty':
+      sorted.sort((a, b) => (b.quantity || 0) - (a.quantity || 0));
+      break;
+    case 'status':
+      sorted.sort((a, b) => String(a.status).localeCompare(String(b.status)));
+      break;
+    case 'orderno':
+      sorted.sort((a, b) => formatOrderNumber(a).localeCompare(formatOrderNumber(b), undefined, { numeric: true }));
+      break;
+    case 'style':
+      sorted.sort((a, b) => String(a.style_number || '').localeCompare(String(b.style_number || '')));
+      break;
+    case 'issue':
+    default:
+      sorted.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+      break;
+  }
+  return sorted;
+};
+
 export interface SizeBreakdown {
   color: string;
   s?: number;
