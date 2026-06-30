@@ -7,6 +7,7 @@ prompt for an AI continuing this work).
 
 ---
 
+
 ## 1. Tech stack
 
 | Layer | Technology |
