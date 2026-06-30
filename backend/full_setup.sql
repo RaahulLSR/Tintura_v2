@@ -157,7 +157,7 @@ create table if not exists orders (
   size_breakdown       jsonb default '[]'::jsonb,
   completion_breakdown jsonb default '[]'::jsonb,
   material_forecast    jsonb default '[]'::jsonb,
-  size_sequence        jsonb default '[]'::jsonb,
+  size_sequence        text[] default ARRAY[]::text[],
   description          text default '',
   qc_notes             text,
   ai_issue_summary     text,

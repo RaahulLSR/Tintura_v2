@@ -29,9 +29,15 @@ const getEnv = (key: string) => {
 // Check for VITE_ prefixed keys first (Standard for Vite apps on Vercel)
 const SUPABASE_URL = getEnv('VITE_SUPABASE_URL') || getEnv('REACT_APP_SUPABASE_URL') || PROJECT_URL;
 const SUPABASE_KEY = getEnv('VITE_SUPABASE_ANON_KEY') || getEnv('REACT_APP_SUPABASE_ANON_KEY') || DEFAULT_KEY;
+const SUPABASE_SERVICE_ROLE_KEY = getEnv('SUPABASE_SERVICE_ROLE_KEY') || getEnv('VITE_SUPABASE_SERVICE_ROLE_KEY') || getEnv('SUPABASE_SERVICE_KEY');
 
 if (SUPABASE_KEY === 'INSERT_YOUR_SUPABASE_ANON_KEY_HERE') {
   console.warn("⚠️ Supabase Anon Key is missing! The app is running in Mock Mode. Please update services/supabase.ts");
 }
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+export const supabaseServer = (typeof window === 'undefined' && SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    })
+  : null;

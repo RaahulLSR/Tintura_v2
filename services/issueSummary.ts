@@ -1,6 +1,6 @@
 import { UserRole, Order, OrderLog } from '../types.js';
 import { getProvider } from './ai/providers.js';
-import { supabase } from './supabase.js';
+import { supabase, supabaseServer } from './supabase.js';
 
 export interface StyleIssueSummaryInsight {
   order_id: string;
@@ -43,13 +43,14 @@ const fallbackSummary = (order: Order, logs: OrderLog[]): string => {
 };
 
 export const generateOrderIssueSummary = async (orderId: string): Promise<{ summary: string | null; error?: string }> => {
-  const { data: order, error: orderError } = await supabase.from('orders').select('*').eq('id', orderId).single();
+  const client = supabaseServer || supabase;
+  const { data: order, error: orderError } = await client.from('orders').select('*').eq('id', orderId).single();
   if (orderError || !order) return { summary: null, error: orderError?.message || 'Order not found.' };
 
   const [logsResult, requestsResult, procurementsResult] = await Promise.all([
-    supabase.from('order_logs').select('*').eq('order_id', orderId).order('created_at', { ascending: true }),
-    supabase.from('material_requests').select('*').eq('order_id', orderId).order('created_at', { ascending: true }),
-    supabase.from('material_procurements').select('*').eq('order_id', orderId).order('created_at', { ascending: true }),
+    client.from('order_logs').select('*').eq('order_id', orderId).order('created_at', { ascending: true }),
+    client.from('material_requests').select('*').eq('order_id', orderId).order('created_at', { ascending: true }),
+    client.from('material_procurements').select('*').eq('order_id', orderId).order('created_at', { ascending: true }),
   ]);
 
   const logs = (logsResult.data || []) as OrderLog[];
@@ -97,7 +98,7 @@ Return 3 to 6 short bullets. Start with the most important warning. Avoid generi
   if (!summary) summary = fallbackSummary(order as Order, logs);
   summary = summary.slice(0, 2400);
 
-  const { error: updateError } = await supabase
+  const { error: updateError } = await client
     .from('orders')
     .update({
       ai_issue_summary: summary,
@@ -117,7 +118,7 @@ export const fetchPreviousStyleIssueSummaries = async (
   const ref = styleRef(styleNumber);
   if (!ref) return [];
 
-  const { data, error } = await supabase
+  const { data, error } = await (supabaseServer || supabase)
     .from('orders')
     .select('id, order_no, style_number, created_at, ai_issue_summary, ai_issue_summary_generated_at')
     .eq('status', 'COMPLETED')

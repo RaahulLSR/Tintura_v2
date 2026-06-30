@@ -12,6 +12,46 @@ interface LaunchOrderModalProps {
   onSuccess: () => void;
 }
 
+const escapeHtml = (value: string) =>
+  value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+const renderMarkdownSummary = (value: string) => {
+  const normalized = (value || '').replace(/\r\n?/g, '\n');
+  const escaped = escapeHtml(normalized);
+  const withBreaks = escaped.replace(/\n/g, '<br />');
+  const withBold = withBreaks.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  const withItalic = withBold.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
+  const lines = withItalic.split('<br />');
+  const html: string[] = [];
+  let inList = false;
+
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+    if (/^[-*]\s+/.test(trimmed)) {
+      if (!inList) {
+        html.push('<ul class="list-disc ml-5 space-y-1">');
+        inList = true;
+      }
+      const content = trimmed.replace(/^[-*]\s+/, '');
+      html.push(`<li>${content}</li>`);
+    } else {
+      if (inList) {
+        html.push('</ul>');
+        inList = false;
+      }
+      html.push(trimmed ? `<div>${trimmed}</div>` : '<div></div>');
+    }
+  });
+
+  if (inList) html.push('</ul>');
+  return html.join('');
+};
+
 export const LaunchOrderModal: React.FC<LaunchOrderModalProps> = ({ isOpen, onClose, units, onSuccess }) => {
   const [isUploading, setIsUploading] = useState(false);
   const [useNumericSizes, setUseNumericSizes] = useState(false);
@@ -233,10 +273,12 @@ export const LaunchOrderModal: React.FC<LaunchOrderModalProps> = ({ isOpen, onCl
                 ) : styleWarnings.length > 0 ? (
                   <div className="mt-3 space-y-3">
                     {styleWarnings.map((item, index) => (
-                    <div key={index}>
-                      {item.summary}
-                    </div>
-                  ))}
+                      <div
+                        key={index}
+                        className="rounded-lg border border-amber-200 bg-white/70 p-3 text-sm text-amber-900"
+                        dangerouslySetInnerHTML={{ __html: renderMarkdownSummary(item.summary) }}
+                      />
+                    ))}
                   </div>
                 ) : (
                   <p className="text-sm text-amber-700 font-medium mt-2">No historical AI issue summaries found for this style.</p>
