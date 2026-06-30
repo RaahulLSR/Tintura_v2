@@ -7,6 +7,22 @@ import { Order, OrderStatus, MaterialRequest, Unit, MaterialStatus, Invoice, Siz
 import { sizesEqual } from './sizes.js';
 import { generateOrderIssueSummary } from './issueSummary.js';
 
+const triggerOrderIssueSummary = async (orderId: string): Promise<void> => {
+  try {
+    const response = await fetch(`${API_BASE}/api/generate-order-summary`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orderId }),
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      throw new Error(text || `generate-order-summary failed with ${response.status}`);
+    }
+  } catch (error) {
+    console.warn('Order issue summary trigger failed', error);
+  }
+};
+
 const API_BASE = (typeof window !== 'undefined' && (window.location.protocol === 'file:' || window.location.hostname === 'localhost'))
   ? 'http://localhost:3001'
   : ''; // Empty string ensures it uses your current Vercel domain
@@ -284,9 +300,11 @@ export const updateOrderStatus = async (orderId: string, status: OrderStatus, no
    await supabase.from('orders').update(payload).eq('id', orderId);
    await addOrderLog(orderId, 'STATUS_CHANGE', `Status: ${status}${notes ? ` - ${notes}` : ''}`);
    if (status === OrderStatus.COMPLETED) {
-       generateOrderIssueSummary(orderId).catch((err) => {
-           console.warn('AI issue summary generation failed:', err);
-       });
+       const { data: order } = await supabase.from('orders').select('*').eq('id', orderId).maybeSingle();
+       if (order) {
+           triggerOrderIssueSummary(orderId);
+           deliverCompletionReport(order as Order).catch(() => {});
+       }
    }
 };
 
@@ -514,6 +532,11 @@ export const deliverCompletionReport = async (order: Order): Promise<void> => {
       label: '📄 Open completion report',
     },
   });
+  await notifyTelegram({
+    targetRole: 'ADMIN',
+    documentUrl: pdfUrl,
+    caption: `📄 <b>Order completion report</b>\nOrder: ${orderNo}\nStyle: ${order.style_number}\nPieces: ${order.quantity}`,
+  }).catch(() => {});
   // Email a copy to Admin as well (channel + email).
   triggerDocEmail({
     targetRole: 'ADMIN',

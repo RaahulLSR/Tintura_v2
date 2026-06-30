@@ -202,13 +202,8 @@ export const SubunitDashboard: React.FC = () => {
               actual_box_count: boxCount,
           });
           if (firstCompletion) {
-              // Deliver the order completion report to Admin's Tintura SST inbox + email.
-              deliverCompletionReport({
-                  ...stockModalOrder,
-                  status: OrderStatus.COMPLETED,
-                  completion_breakdown: breakdown,
-                  actual_box_count: boxCount,
-              }).catch(() => {});
+              // The shared completion handler in services/db.ts will now trigger
+              // the AI summary, report delivery and Telegram PDF fan-out.
           }
           refreshOrders();
       } catch (err: any) {
