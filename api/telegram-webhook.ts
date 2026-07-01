@@ -2582,6 +2582,7 @@ export default async function handler(req: any, res: any) {
       const flow = await loadFlow(chatId);
       const fileId = doc?.file_id || photo![photo!.length - 1].file_id;
       const isImage = !!photo?.length || /^image\//.test(doc?.mime_type || '');
+      const caption = (msg?.caption || '').trim();
 
       // 0) A photo sent right after saving a requirement → attach it to that
       //    requirement (item-level, or to its colour variant).
@@ -2640,8 +2641,7 @@ export default async function handler(req: any, res: any) {
 
       // 2) One-shot caption shortcut: send a photo/file captioned
       //    "style <number> [section]" to attach it straight to a style — no menu.
-      const capRaw = (msg?.caption || '').trim();
-      const styleCmd = capRaw.match(/^(?:style|st|#style)\b[\s:#]*(\S+)(?:\s+(.+))?$/i);
+      const styleCmd = caption.match(/^(?:style|st|#style)\b[\s:#]*(\S+)(?:\s+(.+))?$/i);
       if (styleCmd) {
         const styleRef = styleCmd[1];
         const sectionHint = (styleCmd[2] || '').trim();
@@ -2731,7 +2731,6 @@ export default async function handler(req: any, res: any) {
         await sendTelegram(token, chatId, 'Photo upload failed. Please try again.');
         return res.status(200).json({ ok: true });
       }
-      const caption = capRaw;
       const orders = await fetchOrders();
       const ref = (caption.match(/\d{2,}/) || [])[0];
       const order = ref ? findOrder(orders, ref) : undefined;
