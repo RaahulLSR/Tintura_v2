@@ -1121,6 +1121,312 @@ const parseUpdate = async (text: string): Promise<ParsedUpdate> => {
   }
 };
 
+const isPoLaunchText = (text: string): boolean => {
+  const normalized = (text || '').trim();
+  if (!normalized) return false;
+  return /\b(?:launch|create|raise|make|send|build|generate|open|prepare|draft)\b.*\b(?:po|purchase order)\b/i.test(normalized) ||
+    /\b(?:po|purchase order)\b.*\b(?:launch|create|raise|make|send|build|generate|open|prepare|draft)\b/i.test(normalized);
+};
+
+const wantsPoForward = (text?: string): boolean => {\n  const normalized = (text || ).trim();\n  if (!normalized) return false;\n  return /\b(?:forward|commit|complete|final(?:ise|ize)|send to accounts|send to inventory|dispatch|approve|release)\b/i.test(normalized);\n};\n\nconst parseBuyerName = (text: string): string | undefined => {
+  const lines = (text || '').split(/\r?\n/);
+  for (const line of lines) {
+    const m = line.match(/\b(?:buyer|customer|party|to)\b\s*[:=-]\s*(.+)$/i);
+    if (m) return m[1].trim();
+  }
+  const fallback = text.match(/\b(?:for|to)\b\s+([A-Za-z][A-Za-z0-9 &'\-]{2,})/i);
+  return fallback ? fallback[1].trim() : undefined;
+};
+
+const tryParseJsonFromString = (raw: string): any | null => {
+  const first = raw.indexOf('{');
+  const last = raw.lastIndexOf('}');
+  if (first === -1 || last === -1 || last <= first) return null;
+  const candidate = raw.slice(first, last + 1);
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    return null;
+  }
+};
+
+const parsePoMarkdownTable = (text: string): SalesOrderLine[] => {
+  const rows = (text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const tableRows = rows.filter((line) => line.includes('|'));
+  if (tableRows.length < 2) return [];
+
+  const header = tableRows[0]
+    .split('|')
+    .map((cell) => cell.trim())
+    .filter(Boolean);
+  const dataRows = tableRows.slice(1).filter((line) => !/^[\s|:-]+$/.test(line));
+  const styleIndex = header.findIndex((h) => /style|item|code/i.test(h));
+  const colorIndex = header.findIndex((h) => /color|colour/i.test(h));
+  const totalIndex = header.findIndex((h) => /total|qty|quantity/i.test(h));
+  const rateIndex = header.findIndex((h) => /rate|price/i.test(h));
+  const amountIndex = header.findIndex((h) => /amount|amt/i.test(h));
+  const sizeIndexes = header
+    .map((h, i) => ({ h, i }))
+    .filter(({ h }) => /^[A-Za-z0-9\/]+$/.test(h) && !/style|item|code|color|colour|total|qty|quantity|rate|price|amount|amt/i.test(h))
+    .map(({ i }) => i);
+
+  const lines: SalesOrderLine[] = [];
+  for (const row of dataRows) {
+    const cells = row.split('|').map((cell) => cell.trim());
+    const style = styleIndex >= 0 ? cells[styleIndex] || '' : '';
+    if (!style) continue;
+    const sizes: Record<string, number> = {};
+    let total = 0;
+    for (const idx of sizeIndexes) {
+      const label = header[idx];
+      const value = Number(cells[idx] || 0);
+      if (value > 0) {
+        const key = normalizeSize(label) || label;
+        sizes[key] = value;
+        total += value;
+      }
+    }
+    if (total === 0 && totalIndex >= 0) {
+      total = Number(cells[totalIndex] || 0) || 0;
+    }
+    if (!total) continue;
+    const rate = rateIndex >= 0 ? Number(cells[rateIndex] || 0) || undefined : undefined;
+    const amount = amountIndex >= 0 ? Number(cells[amountIndex] || 0) || undefined : undefined;
+    const color = colorIndex >= 0 ? (cells[colorIndex] || undefined) : undefined;
+    lines.push({ style_number: style, sizes, total, rate, amount, color });
+  }
+  return lines;
+};
+
+const parseOnePoLineText = (line: string): SalesOrderLine | null => {
+  const raw = line.trim();
+  if (!raw || /^(total|subtotal|grand total|note)\b/i.test(raw)) return null;
+  const styleMatch = raw.match(/^(?:style\s*[:=-]\s*)?([A-Za-z0-9][A-Za-z0-9\-\/]+)\b(.*)$/i);
+  let style = styleMatch ? styleMatch[1].trim() : '';
+  let rest = styleMatch ? styleMatch[2].trim() : raw;
+  if (!style) {
+    const firstToken = raw.split(/\s+/)[0];
+    if (firstToken && /[A-Za-z]/.test(firstToken)) {
+      style = firstToken;
+      rest = raw.slice(firstToken.length).trim();
+    }
+  }
+  if (!style) return null;
+
+  const sizes: Record<string, number> = {};
+  let total = 0;
+  for (const m of rest.matchAll(/([A-Za-z0-9\/]+)\s*[:=xX]\s*(\d+)/g)) {
+    const key = normalizeSize(m[1]) || m[1].toUpperCase();
+    const qty = Number(m[2]) || 0;
+    if (qty > 0) {
+      sizes[key] = (sizes[key] || 0) + qty;
+      total += qty;
+    }
+  }
+  const rateMatch = rest.match(/(?:@|rate)\s*[:=]?\s*([\d.]+)/i);
+  const rate = rateMatch ? Number(rateMatch[1]) || undefined : undefined;
+  if (total === 0) {
+    const totalMatch = rest.match(/(?:total|qty|quantity|pcs|pieces)?\s*[:=]?\s*(\d+)\b/i);
+    if (totalMatch) total = Number(totalMatch[1]) || 0;
+  }
+  if (total <= 0) return null;
+  const amount = rate ? Math.round(total * rate * 100) / 100 : undefined;
+  const colorMatch = rest.match(/(?:color|colour)\s*[:=]\s*([A-Za-z0-9 &-]+)/i);
+  const color = colorMatch ? colorMatch[1].trim() : undefined;
+  return { style_number: style, sizes, total, rate, amount, color };
+};
+
+const parsePoFromPlainText = (text: string): { buyer_name?: string; lines: SalesOrderLine[]; note?: string } => {
+  const raw = (text || '').trim();
+  const buyer_name = parseBuyerName(raw);
+  const lines: SalesOrderLine[] = [];
+  const markdownLines = parsePoMarkdownTable(raw);
+  if (markdownLines.length) {
+    return { buyer_name, lines: markdownLines };
+  }
+
+  const parts = raw
+    .split(/\r?\n|;|\|\||\t/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^\s*(buyer|customer|for|purchase order)/i.test(line));
+  for (const part of parts) {
+    const line = parseOnePoLineText(part);
+    if (line) lines.push(line);
+  }
+  return { buyer_name, lines, note: undefined };
+};
+
+const parsePoWithGemini = async (text: string): Promise<{ buyer_name?: string; lines: SalesOrderLine[]; note?: string }> => {
+  if (!GEMINI_KEY) return { lines: [] };
+  try {
+    const prompt =
+      'Extract a purchase order from the input. Reply ONLY with JSON containing: ' +
+      '{"buyer_name":"","lines":[{"style_number":"","sizes":{},"total":0,"rate":0,"amount":0,"color":""}],"note":""}. ' +
+      'Sizes should be keys in the sizes object and values should be quantities. Use exact style numbers. Do not add any extra text.\n\nInput:\n' +
+      text;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_KEY}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0, responseMimeType: 'application/json' },
+      }),
+    });
+    if (!res.ok) return { lines: [] };
+    const data = await res.json();
+    const raw = (data?.candidates?.[0]?.content?.parts || []).map((p: any) => p.text).join('').trim();
+    const parsed = tryParseJsonFromString(raw);
+    if (!parsed || !Array.isArray(parsed.lines)) return { lines: [] };
+    const lines = parsed.lines
+      .map((l: any) => {
+        const sizes: Record<string, number> = {};
+        const rawSizes = l.sizes || {};
+        Object.keys(rawSizes || {}).forEach((k) => {
+          const qty = Number(rawSizes[k]) || 0;
+          if (qty > 0) sizes[normalizeSize(k) || k] = qty;
+        });
+        const total = Number(l.total) || Object.values(sizes).reduce((a, v) => a + v, 0);
+        if (!l.style_number || total <= 0) return null;
+        const rate = Number(l.rate) || undefined;
+        const amount = Number(l.amount) || (rate ? Math.round(total * rate * 100) / 100 : undefined);
+        return {
+          style_number: String(l.style_number).trim(),
+          sizes,
+          total,
+          rate,
+          amount,
+          color: l.color ? String(l.color).trim() : undefined,
+        } as SalesOrderLine;
+      })
+      .filter((l: SalesOrderLine | null): l is SalesOrderLine => !!l);
+    return { buyer_name: parsed.buyer_name ? String(parsed.buyer_name).trim() : undefined, lines, note: parsed.note ? String(parsed.note).trim() : undefined };
+  } catch {
+    return { lines: [] };
+  }
+};
+
+const parsePoFromText = async (text: string): Promise<{ buyer_name?: string; lines: SalesOrderLine[]; note?: string }> => {
+  const fallback = parsePoFromPlainText(text);
+  if (!GEMINI_KEY) return fallback;
+  const aiResult = await parsePoWithGemini(text);
+  return aiResult.lines.length ? aiResult : fallback;
+};
+
+const extractPoFromImage = async (
+  buf: Buffer,
+  mime: string,
+  caption?: string
+): Promise<{ buyer_name?: string; lines: SalesOrderLine[]; note?: string } | null> => {
+  if (!GEMINI_KEY) return null;
+  try {
+    const prompt =
+      'Extract a purchase order from the attached image and caption. Respond ONLY with JSON in this exact shape: ' +
+      '{"buyer_name":"","lines":[{"style_number":"","sizes":{},"total":0,"rate":0,"amount":0,"color":""}],"note":""}. ' +
+      'The image contains a table or list of PO line items. Use any buyer information from the caption or the image. Do not add any extra text.\n\nCaption:\n' +
+      (caption || '') +
+      '\n\nImage:';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_KEY}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              { text: prompt },
+              { inline_data: { mime_type: mime || 'image/jpeg', data: buf.toString('base64') } },
+            ],
+          },
+        ],
+        generationConfig: { temperature: 0, responseMimeType: 'application/json' },
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const raw = (data?.candidates?.[0]?.content?.parts || []).map((p: any) => p.text).join('').trim();
+    const parsed = tryParseJsonFromString(raw);
+    if (!parsed || !Array.isArray(parsed.lines)) return null;
+    const lines = parsed.lines
+      .map((l: any) => {
+        const sizes: Record<string, number> = {};
+        const rawSizes = l.sizes || {};
+        Object.keys(rawSizes || {}).forEach((k) => {
+          const qty = Number(rawSizes[k]) || 0;
+          if (qty > 0) sizes[normalizeSize(k) || k] = qty;
+        });
+        const total = Number(l.total) || Object.values(sizes).reduce((a, v) => a + v, 0);
+        if (!l.style_number || total <= 0) return null;
+        const rate = Number(l.rate) || undefined;
+        const amount = Number(l.amount) || (rate ? Math.round(total * rate * 100) / 100 : undefined);
+        return {
+          style_number: String(l.style_number).trim(),
+          sizes,
+          total,
+          rate,
+          amount,
+          color: l.color ? String(l.color).trim() : undefined,
+        } as SalesOrderLine;
+      })
+      .filter((l: SalesOrderLine | null): l is SalesOrderLine => !!l);
+    return { buyer_name: parsed.buyer_name ? String(parsed.buyer_name).trim() : undefined, lines, note: parsed.note ? String(parsed.note).trim() : undefined };
+  } catch {
+    return null;
+  }
+};
+
+const buildPoSizeFormat = (lines: SalesOrderLine[]): { size_format: 'standard' | 'numeric'; size_labels: string[] } => {
+  const allLabels = Array.from(new Set(lines.flatMap((line) => Object.keys(line.sizes || {}))));
+  const numericOnly = allLabels.length && allLabels.every((label) => /^\d+$/.test(label));
+  return {
+    size_format: numericOnly ? 'numeric' : 'standard',
+    size_labels: numericOnly ? Array.from(new Set(allLabels)) : Array.from(new Set(allLabels.map((label) => normalizeSize(label) || label))),
+  };
+};
+
+const createDraftPoFromParsed = async (
+  token: string,
+  chatId: number | string,
+  parsed: { buyer_name?: string; lines: SalesOrderLine[]; note?: string },
+  caption?: string,
+  forward = false
+): Promise<boolean> => {
+  if (!parsed.lines.length) return false;
+  const buyer_name = parsed.buyer_name?.trim() || 'Walk-in';
+  const poDate = new Date().toISOString().slice(0, 10);
+  const { size_format, size_labels } = buildPoSizeFormat(parsed.lines);
+  try {
+    const so = await createSalesOrder({
+      po_number: 'auto',
+      po_date: poDate,
+      buyer_name,
+      size_format,
+      size_labels,
+      lines: parsed.lines,
+      note: parsed.note || caption || undefined,
+      created_by_name: 'Telegram',
+    });
+    if (forward) {
+      await forwardSalesOrder(so.id);
+    }
+    await sendTelegram(
+      token,
+      chatId,
+      forward
+        ? `✅ PO ${so.po_number} created and forwarded to Inventory & Accounts for ${so.buyer_name} (${so.total_qty} pcs).`
+        : `✅ Draft PO ${so.po_number} created for ${so.buyer_name} (${so.total_qty} pcs). Use the menu to view or forward it after verification.`
+    );
+    await sendPoPdf(token, chatId, forward ? { ...so, status: 'FORWARDED' } : so, forward ? 'PO forwarded' : 'Draft PO created');
+    return true;
+  } catch (e: any) {
+    await sendTelegram(token, chatId, `Could not create the PO: ${e?.message || 'unknown error'}.`);
+    return true;
+  }
+};
+
 /** Rewrite a short voice/text floor update as one concise English sentence
  *  suitable for an order activity log. Falls back to the raw transcript when no
  *  AI key is configured or the call fails. */
@@ -2377,7 +2683,28 @@ export default async function handler(req: any, res: any) {
         return res.status(200).json({ ok: true });
       }
 
-      // 3) Otherwise treat an IMAGE as a status-timeline photo for an order.
+      // 3) If the photo is captioned as a PO request, try extracting the PO and creating a draft.
+      if (caption && isImage && isPoLaunchText(caption)) {
+        const dlPo = await downloadTelegramFile(token, fileId, doc?.file_name || 'photo.jpg');
+        if (!dlPo) {
+          await sendTelegram(token, chatId, 'Could not download that photo. Please try again.');
+          return res.status(200).json({ ok: true });
+        }
+        const parsed = (await extractPoFromImage(dlPo.buf, dlPo.contentType, caption)) || (await parsePoFromText(caption));
+        if (parsed.lines.length) {
+          await createDraftPoFromParsed(token, chatId, parsed, caption, wantsPoForward(caption));
+          return res.status(200).json({ ok: true });
+        }
+        await sendTelegram(
+          token,
+          chatId,
+          'I could not recognise the PO details from that image. Please send the buyer name and style quantities as text or attach a clearer table image.',
+          MAIN_MENU
+        );
+        return res.status(200).json({ ok: true });
+      }
+
+      // 4) Otherwise treat an IMAGE as a status-timeline photo for an order.
       if (!isImage) {
         await sendTelegram(
           token,
@@ -2433,6 +2760,21 @@ export default async function handler(req: any, res: any) {
         return res.status(200).json({ ok: true });
       }
       await sendTelegram(token, chatId, `📝 "${transcript}"`);
+      if (isPoLaunchText(transcript)) {
+        const parsed = await parsePoFromText(transcript);
+        if (parsed.lines.length) {
+          const forward = wantsPoForward(transcript);
+          await createDraftPoFromParsed(token, chatId, parsed, transcript, forward);
+          return res.status(200).json({ ok: true });
+        }
+        await sendTelegram(
+          token,
+          chatId,
+          'I recognised a PO request, but could not extract the line details. Please send the buyer name and style quantities in text, or attach a clearer table image.',
+          MAIN_MENU
+        );
+        return res.status(200).json({ ok: true });
+      }
       await handleSpokenUpdate(token, chatId, transcript);
       return res.status(200).json({ ok: true });
     }
@@ -2441,6 +2783,20 @@ export default async function handler(req: any, res: any) {
     const text = (msg?.text || msg?.caption || '').trim();
     if (!text) return res.status(200).json({ ok: true });
 
+    if (isPoLaunchText(text)) {
+      const parsed = await parsePoFromText(text);
+      if (parsed.lines.length) {
+        await createDraftPoFromParsed(token, chatId, parsed, text, wantsPoForward(text));
+        return res.status(200).json({ ok: true });
+      }
+      await sendTelegram(
+        token,
+        chatId,
+        'To create a PO, send the buyer name and style quantities as text or attach an image of the PO table. Example: "Buyer: ABC\nStyle 1001 S:10 M:20 L:5".',
+        MAIN_MENU
+      );
+      return res.status(200).json({ ok: true });
+    }
     if (/^\/(start|menu)\b/i.test(text)) {
       await clearFlow(chatId);
       await sendMenu(token, chatId, 'Tintura bot. Tap what you need:');
