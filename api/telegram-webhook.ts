@@ -1128,7 +1128,13 @@ const isPoLaunchText = (text: string): boolean => {
     /\b(?:po|purchase order)\b.*\b(?:launch|create|raise|make|send|build|generate|open|prepare|draft)\b/i.test(normalized);
 };
 
-const wantsPoForward = (text?: string): boolean => {\n  const normalized = (text || ).trim();\n  if (!normalized) return false;\n  return /\b(?:forward|commit|complete|final(?:ise|ize)|send to accounts|send to inventory|dispatch|approve|release)\b/i.test(normalized);\n};\n\nconst parseBuyerName = (text: string): string | undefined => {
+const wantsPoForward = (text?: string): boolean => {
+  const normalized = (text || '').trim();
+  if (!normalized) return false;
+  return /\b(?:forward|commit|complete|final(?:ise|ize)|send to accounts|send to inventory|dispatch|approve|release)\b/i.test(normalized);
+};
+
+const parseBuyerName = (text: string): string | undefined => {
   const lines = (text || '').split(/\r?\n/);
   for (const line of lines) {
     const m = line.match(/\b(?:buyer|customer|party|to)\b\s*[:=-]\s*(.+)$/i);
